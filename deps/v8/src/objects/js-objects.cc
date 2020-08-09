@@ -27,7 +27,6 @@
 #include "src/objects/field-type.h"
 #include "src/objects/fixed-array.h"
 #include "src/objects/heap-number.h"
-#include "src/objects/js-aggregate-error.h"
 #include "src/objects/js-array-buffer.h"
 #include "src/objects/js-array-inl.h"
 #include "src/objects/layout-descriptor.h"
@@ -72,6 +71,8 @@
 #include "src/strings/string-stream.h"
 #include "src/utils/ostreams.h"
 #include "src/wasm/wasm-objects.h"
+#include "torque-generated/exported-class-definitions-tq-inl.h"
+#include "torque-generated/exported-class-definitions-tq.h"
 
 namespace v8 {
 namespace internal {
@@ -704,14 +705,18 @@ void JSReceiver::DeleteNormalizedProperty(Handle<JSReceiver> object,
   DCHECK(entry.is_found());
 
   if (object->IsJSGlobalObject()) {
-    // If we have a global object, invalidate the cell and swap in a new one.
+    // If we have a global object, invalidate the cell and remove it from the
+    // global object's dictionary.
     Handle<GlobalDictionary> dictionary(
         JSGlobalObject::cast(*object).global_dictionary(), isolate);
 
-    auto cell = PropertyCell::InvalidateEntry(isolate, dictionary, entry);
-    cell->set_value(ReadOnlyRoots(isolate).the_hole_value());
-    cell->set_property_details(
-        PropertyDetails::Empty(PropertyCellType::kUninitialized));
+    Handle<PropertyCell> cell(dictionary->CellAt(entry), isolate);
+
+    Handle<GlobalDictionary> new_dictionary =
+        GlobalDictionary::DeleteEntry(isolate, dictionary, entry);
+    JSGlobalObject::cast(*object).set_global_dictionary(*new_dictionary);
+
+    cell->ClearAndInvalidate(ReadOnlyRoots(isolate));
   } else {
     Handle<NameDictionary> dictionary(object->property_dictionary(), isolate);
 
@@ -2080,8 +2085,6 @@ int JSObject::GetHeaderSize(InstanceType type,
       return JSObject::kHeaderSize;
     case JS_GENERATOR_OBJECT_TYPE:
       return JSGeneratorObject::kHeaderSize;
-    case JS_AGGREGATE_ERROR_TYPE:
-      return JSAggregateError::kHeaderSize;
     case JS_ASYNC_FUNCTION_OBJECT_TYPE:
       return JSAsyncFunctionObject::kHeaderSize;
     case JS_ASYNC_GENERATOR_OBJECT_TYPE:
@@ -2324,17 +2327,16 @@ void JSObject::SetNormalizedProperty(Handle<JSObject> object, Handle<Name> name,
     Handle<JSGlobalObject> global_obj = Handle<JSGlobalObject>::cast(object);
     Handle<GlobalDictionary> dictionary(global_obj->global_dictionary(),
                                         isolate);
-    InternalIndex entry =
-        dictionary->FindEntry(ReadOnlyRoots(isolate), name, hash);
+    ReadOnlyRoots roots(isolate);
+    InternalIndex entry = dictionary->FindEntry(isolate, roots, name, hash);
 
     if (entry.is_not_found()) {
       DCHECK_IMPLIES(global_obj->map().is_prototype_map(),
                      Map::IsPrototypeChainInvalidated(global_obj->map()));
       auto cell = isolate->factory()->NewPropertyCell(name);
       cell->set_value(*value);
-      auto cell_type = value->IsUndefined(isolate)
-                           ? PropertyCellType::kUndefined
-                           : PropertyCellType::kConstant;
+      auto cell_type = value->IsUndefined(roots) ? PropertyCellType::kUndefined
+                                                 : PropertyCellType::kConstant;
       details = details.set_cell_type(cell_type);
       value = cell;
       dictionary =
@@ -3327,7 +3329,7 @@ void JSObject::MigrateSlowToFast(Handle<JSObject> object,
   ReadOnlyRoots roots(isolate);
   for (int i = 0; i < instance_descriptor_length; i++) {
     InternalIndex index(Smi::ToInt(iteration_order->get(i)));
-    DCHECK(dictionary->IsKey(roots, dictionary->KeyAt(index)));
+    DCHECK(dictionary->IsKey(roots, dictionary->KeyAt(isolate, index)));
 
     PropertyKind kind = dictionary->DetailsAt(index).kind();
     if (kind == kData) {
@@ -4396,24 +4398,36 @@ void InvalidateOnePrototypeValidityCellInternal(Map map) {
 }
 
 void InvalidatePrototypeChainsInternal(Map map) {
-  InvalidateOnePrototypeValidityCellInternal(map);
+  // We handle linear prototype chains by looping, and multiple children
+  // by recursion, in order to reduce the likelihood of running into stack
+  // overflows. So, conceptually, the outer loop iterates the depth of the
+  // prototype tree, and the inner loop iterates the breadth of a node.
+  Map next_map;
+  for (; !map.is_null(); map = next_map, next_map = Map()) {
+    InvalidateOnePrototypeValidityCellInternal(map);
 
-  Object maybe_proto_info = map.prototype_info();
-  if (!maybe_proto_info.IsPrototypeInfo()) return;
-  PrototypeInfo proto_info = PrototypeInfo::cast(maybe_proto_info);
-  if (!proto_info.prototype_users().IsWeakArrayList()) {
-    return;
-  }
-  WeakArrayList prototype_users =
-      WeakArrayList::cast(proto_info.prototype_users());
-  // For now, only maps register themselves as users.
-  for (int i = PrototypeUsers::kFirstIndex; i < prototype_users.length(); ++i) {
-    HeapObject heap_object;
-    if (prototype_users.Get(i)->GetHeapObjectIfWeak(&heap_object) &&
-        heap_object.IsMap()) {
-      // Walk the prototype chain (backwards, towards leaf objects) if
-      // necessary.
-      InvalidatePrototypeChainsInternal(Map::cast(heap_object));
+    Object maybe_proto_info = map.prototype_info();
+    if (!maybe_proto_info.IsPrototypeInfo()) return;
+    PrototypeInfo proto_info = PrototypeInfo::cast(maybe_proto_info);
+    if (!proto_info.prototype_users().IsWeakArrayList()) {
+      return;
+    }
+    WeakArrayList prototype_users =
+        WeakArrayList::cast(proto_info.prototype_users());
+    // For now, only maps register themselves as users.
+    for (int i = PrototypeUsers::kFirstIndex; i < prototype_users.length();
+         ++i) {
+      HeapObject heap_object;
+      if (prototype_users.Get(i)->GetHeapObjectIfWeak(&heap_object) &&
+          heap_object.IsMap()) {
+        // Walk the prototype chain (backwards, towards leaf objects) if
+        // necessary.
+        if (next_map.is_null()) {
+          next_map = Map::cast(heap_object);
+        } else {
+          InvalidatePrototypeChainsInternal(Map::cast(heap_object));
+        }
+      }
     }
   }
 }
@@ -4995,9 +5009,10 @@ void JSFunction::EnsureClosureFeedbackCellArray(Handle<JSFunction> function) {
 }
 
 // static
-void JSFunction::EnsureFeedbackVector(Handle<JSFunction> function) {
+void JSFunction::EnsureFeedbackVector(Handle<JSFunction> function,
+                                      IsCompiledScope* is_compiled_scope) {
   Isolate* const isolate = function->GetIsolate();
-  DCHECK(function->shared().is_compiled());
+  DCHECK(is_compiled_scope->is_compiled());
   DCHECK(function->shared().HasFeedbackMetadata());
   if (function->has_feedback_vector()) return;
   if (function->shared().HasAsmWasmData()) return;
@@ -5008,8 +5023,8 @@ void JSFunction::EnsureFeedbackVector(Handle<JSFunction> function) {
   EnsureClosureFeedbackCellArray(function);
   Handle<ClosureFeedbackCellArray> closure_feedback_cell_array =
       handle(function->closure_feedback_cell_array(), isolate);
-  Handle<HeapObject> feedback_vector =
-      FeedbackVector::New(isolate, shared, closure_feedback_cell_array);
+  Handle<HeapObject> feedback_vector = FeedbackVector::New(
+      isolate, shared, closure_feedback_cell_array, is_compiled_scope);
   // EnsureClosureFeedbackCellArray should handle the special case where we need
   // to allocate a new feedback cell. Please look at comment in that function
   // for more details.
@@ -5020,7 +5035,8 @@ void JSFunction::EnsureFeedbackVector(Handle<JSFunction> function) {
 }
 
 // static
-void JSFunction::InitializeFeedbackCell(Handle<JSFunction> function) {
+void JSFunction::InitializeFeedbackCell(Handle<JSFunction> function,
+                                        IsCompiledScope* is_compiled_scope) {
   Isolate* const isolate = function->GetIsolate();
 
   if (function->has_feedback_vector()) {
@@ -5029,16 +5045,16 @@ void JSFunction::InitializeFeedbackCell(Handle<JSFunction> function) {
     return;
   }
 
-  bool needs_feedback_vector = !FLAG_lazy_feedback_allocation;
-  // We need feedback vector for certain log events, collecting type profile
-  // and more precise code coverage.
-  if (FLAG_log_function_events) needs_feedback_vector = true;
-  if (!isolate->is_best_effort_code_coverage()) needs_feedback_vector = true;
-  if (isolate->is_collecting_type_profile()) needs_feedback_vector = true;
-  if (FLAG_always_opt) needs_feedback_vector = true;
+  const bool needs_feedback_vector =
+      !FLAG_lazy_feedback_allocation || FLAG_always_opt ||
+      function->shared().may_have_cached_code() ||
+      // We also need a feedback vector for certain log events, collecting type
+      // profile and more precise code coverage.
+      FLAG_log_function_events || !isolate->is_best_effort_code_coverage() ||
+      isolate->is_collecting_type_profile();
 
   if (needs_feedback_vector) {
-    EnsureFeedbackVector(function);
+    EnsureFeedbackVector(function, is_compiled_scope);
   } else {
     EnsureClosureFeedbackCellArray(function);
   }
@@ -5160,8 +5176,16 @@ void JSFunction::EnsureHasInitialMap(Handle<JSFunction> function) {
   if (function->has_initial_map()) return;
   Isolate* isolate = function->GetIsolate();
 
-  // First create a new map with the size and number of in-object properties
-  // suggested by the function.
+  int expected_nof_properties =
+      CalculateExpectedNofProperties(isolate, function);
+
+  // {CalculateExpectedNofProperties} can have had the side effect of creating
+  // the initial map (e.g. it could have triggered an optimized compilation
+  // whose dependency installation reentered {EnsureHasInitialMap}).
+  if (function->has_initial_map()) return;
+
+  // Create a new map with the size and number of in-object properties suggested
+  // by the function.
   InstanceType instance_type;
   if (IsResumableFunction(function->shared().kind())) {
     instance_type = IsAsyncGeneratorFunction(function->shared().kind())
@@ -5173,8 +5197,6 @@ void JSFunction::EnsureHasInitialMap(Handle<JSFunction> function) {
 
   int instance_size;
   int inobject_properties;
-  int expected_nof_properties =
-      CalculateExpectedNofProperties(isolate, function);
   CalculateInstanceSizeHelper(instance_type, false, 0, expected_nof_properties,
                               &instance_size, &inobject_properties);
 
@@ -5202,7 +5224,6 @@ namespace {
 
 bool CanSubclassHaveInobjectProperties(InstanceType instance_type) {
   switch (instance_type) {
-    case JS_AGGREGATE_ERROR_TYPE:
     case JS_API_OBJECT_TYPE:
     case JS_ARRAY_BUFFER_TYPE:
     case JS_ARRAY_TYPE:
@@ -5571,13 +5592,13 @@ int JSFunction::CalculateExpectedNofProperties(Isolate* isolate,
     // The super constructor should be compiled for the number of expected
     // properties to be available.
     Handle<SharedFunctionInfo> shared(func->shared(), isolate);
-    IsCompiledScope is_compiled_scope(shared->is_compiled_scope());
+    IsCompiledScope is_compiled_scope(shared->is_compiled_scope(isolate));
     if (is_compiled_scope.is_compiled() ||
         Compiler::Compile(func, Compiler::CLEAR_EXCEPTION,
                           &is_compiled_scope)) {
       DCHECK(shared->is_compiled());
       int count = shared->expected_nof_properties();
-      // Check that the estimate is sane.
+      // Check that the estimate is sensible.
       if (expected_nof_properties <= JSObject::kMaxInObjectProperties - count) {
         expected_nof_properties += count;
       } else {
@@ -5658,38 +5679,8 @@ void JSGlobalObject::InvalidatePropertyCell(Handle<JSGlobalObject> global,
   auto dictionary = handle(global->global_dictionary(), global->GetIsolate());
   InternalIndex entry = dictionary->FindEntry(global->GetIsolate(), name);
   if (entry.is_not_found()) return;
-  PropertyCell::InvalidateEntry(global->GetIsolate(), dictionary, entry);
-}
-
-Handle<PropertyCell> JSGlobalObject::EnsureEmptyPropertyCell(
-    Handle<JSGlobalObject> global, Handle<Name> name,
-    PropertyCellType cell_type, InternalIndex* entry_out) {
-  Isolate* isolate = global->GetIsolate();
-  DCHECK(!global->HasFastProperties());
-  Handle<GlobalDictionary> dictionary(global->global_dictionary(), isolate);
-  InternalIndex entry = dictionary->FindEntry(isolate, name);
-  Handle<PropertyCell> cell;
-  if (entry.is_found()) {
-    if (entry_out) *entry_out = entry;
-    cell = handle(dictionary->CellAt(entry), isolate);
-    PropertyCellType original_cell_type = cell->property_details().cell_type();
-    DCHECK(original_cell_type == PropertyCellType::kInvalidated ||
-           original_cell_type == PropertyCellType::kUninitialized);
-    DCHECK(cell->value().IsTheHole(isolate));
-    if (original_cell_type == PropertyCellType::kInvalidated) {
-      cell = PropertyCell::InvalidateEntry(isolate, dictionary, entry);
-    }
-    PropertyDetails details(kData, NONE, cell_type);
-    cell->set_property_details(details);
-    return cell;
-  }
-  cell = isolate->factory()->NewPropertyCell(name);
-  PropertyDetails details(kData, NONE, cell_type);
-  dictionary = GlobalDictionary::Add(isolate, dictionary, name, cell, details,
-                                     entry_out);
-  // {*entry_out} is initialized inside GlobalDictionary::Add().
-  global->SetProperties(*dictionary);
-  return cell;
+  PropertyCell::InvalidateAndReplaceEntry(global->GetIsolate(), dictionary,
+                                          entry);
 }
 
 // static

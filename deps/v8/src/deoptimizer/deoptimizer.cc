@@ -26,6 +26,7 @@
 #include "src/objects/heap-number-inl.h"
 #include "src/objects/smi.h"
 #include "src/tracing/trace-event.h"
+#include "torque-generated/exported-class-definitions-tq.h"
 
 // Has to be the last include (doesn't have include guards)
 #include "src/objects/object-macros.h"
@@ -64,7 +65,7 @@ class FrameWriter {
   void PushCallerPc(intptr_t pc) {
     top_offset_ -= kPCOnStackSize;
     frame_->SetCallerPc(top_offset_, pc);
-    DebugPrintOutputValue(pc, "caller's pc\n");
+    DebugPrintOutputPc(pc, "caller's pc\n");
   }
 
   void PushCallerFp(intptr_t fp) {
@@ -111,6 +112,20 @@ class FrameWriter {
              "    " V8PRIxPTR_FMT ": [top + %3d] <- " V8PRIxPTR_FMT " ;  %s",
              output_address(top_offset_), top_offset_, value, debug_hint);
     }
+  }
+
+  void DebugPrintOutputPc(intptr_t value, const char* debug_hint = "") {
+#ifdef V8_ENABLE_CONTROL_FLOW_INTEGRITY
+    if (trace_scope_ != nullptr) {
+      PrintF(trace_scope_->file(),
+             "    " V8PRIxPTR_FMT ": [top + %3d] <- " V8PRIxPTR_FMT
+             " (signed) " V8PRIxPTR_FMT " (unsigned) ;  %s",
+             output_address(top_offset_), top_offset_, value,
+             PointerAuthentication::StripPAC(value), debug_hint);
+    }
+#else
+    DebugPrintOutputValue(value, debug_hint);
+#endif
   }
 
   void DebugPrintOutputObject(Object obj, unsigned output_offset,
@@ -161,7 +176,7 @@ Code Deoptimizer::FindDeoptimizingCode(Address addr) {
     Object element = native_context.DeoptimizedCodeListHead();
     while (!element.IsUndefined(isolate)) {
       Code code = Code::cast(element);
-      CHECK(code.kind() == Code::OPTIMIZED_FUNCTION);
+      CHECK_EQ(code.kind(), Code::OPTIMIZED_FUNCTION);
       if (code.contains(addr)) return code;
       element = code.next_code_link();
     }
@@ -451,14 +466,16 @@ void Deoptimizer::ComputeOutputFrames(Deoptimizer* deoptimizer) {
   deoptimizer->DoComputeOutputFrames();
 }
 
-const char* Deoptimizer::MessageFor(DeoptimizeKind kind) {
+const char* Deoptimizer::MessageFor(DeoptimizeKind kind, bool reuse_code) {
   switch (kind) {
     case DeoptimizeKind::kEager:
-      return "eager";
+      DCHECK(!reuse_code);
+      return "deopt-eager";
     case DeoptimizeKind::kSoft:
-      return "soft";
+      return reuse_code ? "bailout-soft" : "deopt-soft";
     case DeoptimizeKind::kLazy:
-      return "lazy";
+      DCHECK(!reuse_code);
+      return "deopt-lazy";
   }
   FATAL("Unsupported deopt kind");
   return nullptr;
@@ -513,16 +530,17 @@ Deoptimizer::Deoptimizer(Isolate* isolate, JSFunction function,
   DCHECK(AllowHeapAllocation::IsAllowed());
   disallow_heap_allocation_ = new DisallowHeapAllocation();
 #endif  // DEBUG
-  if ((compiled_code_.kind() != Code::OPTIMIZED_FUNCTION ||
-       !compiled_code_.deopt_already_counted()) &&
+  CHECK_EQ(compiled_code_.kind(), Code::OPTIMIZED_FUNCTION);
+  if (!compiled_code_.deopt_already_counted() &&
       deopt_kind_ == DeoptimizeKind::kSoft) {
     isolate->counters()->soft_deopts_executed()->Increment();
   }
-  if (compiled_code_.kind() == Code::OPTIMIZED_FUNCTION) {
-    compiled_code_.set_deopt_already_counted(true);
+  compiled_code_.set_deopt_already_counted(true);
+  {
     HandleScope scope(isolate_);
-    PROFILE(isolate_, CodeDeoptEvent(handle(compiled_code_, isolate_), kind,
-                                     from_, fp_to_sp_delta_));
+    PROFILE(isolate_,
+            CodeDeoptEvent(handle(compiled_code_, isolate_), kind, from_,
+                           fp_to_sp_delta_, should_reuse_code()));
   }
   unsigned size = ComputeInputFrameSize();
   const int parameter_count =
@@ -583,6 +601,12 @@ Handle<JSFunction> Deoptimizer::function() const {
 }
 Handle<Code> Deoptimizer::compiled_code() const {
   return Handle<Code>(compiled_code_, isolate());
+}
+
+bool Deoptimizer::should_reuse_code() const {
+  int count = compiled_code_.deoptimization_count();
+  return deopt_kind_ == DeoptimizeKind::kSoft &&
+         count < FLAG_reuse_opt_code_count;
 }
 
 Deoptimizer::~Deoptimizer() {
@@ -650,7 +674,7 @@ int Deoptimizer::GetDeoptimizedCodeCount(Isolate* isolate) {
     Object element = native_context.DeoptimizedCodeListHead();
     while (!element.IsUndefined(isolate)) {
       Code code = Code::cast(element);
-      DCHECK(code.kind() == Code::OPTIMIZED_FUNCTION);
+      DCHECK_EQ(code.kind(), Code::OPTIMIZED_FUNCTION);
       if (!code.marked_for_deoptimization()) {
         length++;
       }
@@ -733,8 +757,8 @@ void Deoptimizer::DoComputeOutputFrames() {
 
   if (trace_scope_ != nullptr) {
     timer.Start();
-    PrintF(trace_scope_->file(), "[deoptimizing (DEOPT %s): begin ",
-           MessageFor(deopt_kind_));
+    PrintF(trace_scope_->file(), "[bailout (kind: %s): begin ",
+           MessageFor(deopt_kind_, should_reuse_code()));
     PrintFunctionName();
     PrintF(trace_scope_->file(),
            " (opt #%d) @%d, FP to SP delta: %d, caller sp: " V8PRIxPTR_FMT
@@ -835,13 +859,14 @@ void Deoptimizer::DoComputeOutputFrames() {
   if (trace_scope_ != nullptr) {
     double ms = timer.Elapsed().InMillisecondsF();
     int index = output_count_ - 1;  // Index of the topmost frame.
-    PrintF(trace_scope_->file(), "[deoptimizing (%s): end ",
-           MessageFor(deopt_kind_));
+    PrintF(trace_scope_->file(), "[bailout (kind: %s): end ",
+           MessageFor(deopt_kind_, should_reuse_code()));
     PrintFunctionName();
     PrintF(trace_scope_->file(),
-           " @%d => node=%d, pc=" V8PRIxPTR_FMT ", caller sp=" V8PRIxPTR_FMT
-           ", took %0.3f ms]\n",
-           bailout_id_, node_id.ToInt(), output_[index]->GetPc(),
+           " @%d => node=%d, pc=" V8PRIxPTR_FMT
+           " (unsigned), caller sp=" V8PRIxPTR_FMT ", took %0.3f ms]\n",
+           bailout_id_, node_id.ToInt(),
+           PointerAuthentication::StripPAC(output_[index]->GetPc()),
            caller_frame_top_, ms);
   }
 
@@ -911,9 +936,19 @@ void Deoptimizer::DoComputeInterpretedFrame(TranslatedFrame* translated_frame,
     frame_writer.PushRawObject(roots.the_hole_value(), "padding\n");
   }
 
+#ifdef V8_REVERSE_JSARGS
+  std::vector<TranslatedFrame::iterator> parameters;
+  for (int i = 0; i < parameters_count; ++i, ++value_iterator) {
+    parameters.push_back(value_iterator);
+  }
+  for (auto& parameter : base::Reversed(parameters)) {
+    frame_writer.PushTranslatedValue(parameter, "stack parameter");
+  }
+#else
   for (int i = 0; i < parameters_count; ++i, ++value_iterator) {
     frame_writer.PushTranslatedValue(value_iterator, "stack parameter");
   }
+#endif
 
   DCHECK_EQ(output_frame->GetLastArgumentSlotOffset(),
             frame_writer.top_offset());
@@ -1793,14 +1828,13 @@ unsigned Deoptimizer::ComputeInputFrameSize() const {
   // function into account so we have to avoid double counting them.
   unsigned fixed_size_above_fp = ComputeInputFrameAboveFpFixedSize();
   unsigned result = fixed_size_above_fp + fp_to_sp_delta_;
-  if (compiled_code_.kind() == Code::OPTIMIZED_FUNCTION) {
-    unsigned stack_slots = compiled_code_.stack_slots();
-    unsigned outgoing_size = 0;
-    //        ComputeOutgoingArgumentSize(compiled_code_, bailout_id_);
-    CHECK_EQ(fixed_size_above_fp + (stack_slots * kSystemPointerSize) -
-                 CommonFrameConstants::kFixedFrameSizeAboveFp + outgoing_size,
-             result);
-  }
+  DCHECK_EQ(compiled_code_.kind(), Code::OPTIMIZED_FUNCTION);
+  unsigned stack_slots = compiled_code_.stack_slots();
+  unsigned outgoing_size = 0;
+  //        ComputeOutgoingArgumentSize(compiled_code_, bailout_id_);
+  CHECK_EQ(fixed_size_above_fp + (stack_slots * kSystemPointerSize) -
+               CommonFrameConstants::kFixedFrameSizeAboveFp + outgoing_size,
+           result);
   return result;
 }
 
@@ -3461,6 +3495,7 @@ void TranslatedState::InitializeCapturedObjectAt(
     case STRING_TABLE_TYPE:
     case PROPERTY_ARRAY_TYPE:
     case SCRIPT_CONTEXT_TABLE_TYPE:
+    case SLOPPY_ARGUMENTS_ELEMENTS_TYPE:
       InitializeObjectWithTaggedFieldsAt(frame, &value_index, slot, map,
                                          no_allocation);
       break;
@@ -3619,6 +3654,19 @@ void TranslatedState::EnsureCapturedObjectAllocatedAt(
       } else {
         slot->set_storage(AllocateStorageFor(slot));
       }
+
+      // Make sure all the remaining children (after the map) are allocated.
+      return EnsureChildrenAllocated(slot->GetChildrenCount() - 1, frame,
+                                     &value_index, worklist);
+    }
+
+    case SLOPPY_ARGUMENTS_ELEMENTS_TYPE: {
+      // Verify that the arguments size is correct.
+      int args_length = frame->values_[value_index].GetSmiValue();
+      int args_size = SloppyArgumentsElements::SizeFor(args_length);
+      CHECK_EQ(args_size, slot->GetChildrenCount() * kTaggedSize);
+
+      slot->set_storage(AllocateStorageFor(slot));
 
       // Make sure all the remaining children (after the map) are allocated.
       return EnsureChildrenAllocated(slot->GetChildrenCount() - 1, frame,

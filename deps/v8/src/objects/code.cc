@@ -30,12 +30,20 @@
 namespace v8 {
 namespace internal {
 
+Address Code::SafepointTableAddress() const {
+  return InstructionStart() + safepoint_table_offset();
+}
+
 int Code::safepoint_table_size() const {
   DCHECK_GE(handler_table_offset() - safepoint_table_offset(), 0);
   return handler_table_offset() - safepoint_table_offset();
 }
 
 bool Code::has_safepoint_table() const { return safepoint_table_size() > 0; }
+
+Address Code::HandlerTableAddress() const {
+  return InstructionStart() + handler_table_offset();
+}
 
 int Code::handler_table_size() const {
   DCHECK_GE(constant_pool_offset() - handler_table_offset(), 0);
@@ -238,14 +246,12 @@ const char* AbstractCode::Kind2String(Kind kind) {
 }
 
 bool Code::IsIsolateIndependent(Isolate* isolate) {
-  constexpr int all_real_modes_mask =
-      (1 << (RelocInfo::LAST_REAL_RELOC_MODE + 1)) - 1;
-  constexpr int mode_mask = all_real_modes_mask &
-                            ~RelocInfo::ModeMask(RelocInfo::CONST_POOL) &
-                            ~RelocInfo::ModeMask(RelocInfo::OFF_HEAP_TARGET) &
-                            ~RelocInfo::ModeMask(RelocInfo::VENEER_POOL);
-  STATIC_ASSERT(RelocInfo::LAST_REAL_RELOC_MODE == RelocInfo::VENEER_POOL);
-  STATIC_ASSERT(mode_mask ==
+  static constexpr int kModeMask =
+      RelocInfo::AllRealModesMask() &
+      ~RelocInfo::ModeMask(RelocInfo::CONST_POOL) &
+      ~RelocInfo::ModeMask(RelocInfo::OFF_HEAP_TARGET) &
+      ~RelocInfo::ModeMask(RelocInfo::VENEER_POOL);
+  STATIC_ASSERT(kModeMask ==
                 (RelocInfo::ModeMask(RelocInfo::CODE_TARGET) |
                  RelocInfo::ModeMask(RelocInfo::RELATIVE_CODE_TARGET) |
                  RelocInfo::ModeMask(RelocInfo::COMPRESSED_EMBEDDED_OBJECT) |
@@ -257,11 +263,13 @@ bool Code::IsIsolateIndependent(Isolate* isolate) {
                  RelocInfo::ModeMask(RelocInfo::WASM_CALL) |
                  RelocInfo::ModeMask(RelocInfo::WASM_STUB_CALL)));
 
-  bool is_process_independent = true;
-  for (RelocIterator it(*this, mode_mask); !it.done(); it.next()) {
-#if defined(V8_TARGET_ARCH_X64) || defined(V8_TARGET_ARCH_ARM64) || \
-    defined(V8_TARGET_ARCH_ARM) || defined(V8_TARGET_ARCH_MIPS) ||  \
+#if defined(V8_TARGET_ARCH_PPC) || defined(V8_TARGET_ARCH_PPC64) || \
+    defined(V8_TARGET_ARCH_MIPS64)
+  return RelocIterator(*this, kModeMask).done();
+#elif defined(V8_TARGET_ARCH_X64) || defined(V8_TARGET_ARCH_ARM64) || \
+    defined(V8_TARGET_ARCH_ARM) || defined(V8_TARGET_ARCH_MIPS) ||    \
     defined(V8_TARGET_ARCH_S390) || defined(V8_TARGET_ARCH_IA32)
+  for (RelocIterator it(*this, kModeMask); !it.done(); it.next()) {
     // On these platforms we emit relative builtin-to-builtin
     // jumps for isolate independent builtins in the snapshot. They are later
     // rewritten as pc-relative jumps to the off-heap instruction stream and are
@@ -274,11 +282,72 @@ bool Code::IsIsolateIndependent(Isolate* isolate) {
       CHECK(target.IsCode());
       if (Builtins::IsIsolateIndependentBuiltin(target)) continue;
     }
+    return false;
+  }
+#else
+#error Unsupported architecture.
 #endif
-    is_process_independent = false;
+  return true;
+}
+
+// Multiple native contexts live on the same heap, and V8 currently
+// draws no clear distinction between native-context-dependent and
+// independent objects. A good guideline is "objects embedded into
+// bytecode are nc-independent", since bytecode is shared between
+// native contexts. Among others, this is the case for ScopeInfo,
+// SharedFunctionInfo, String, etc.
+bool Code::IsNativeContextIndependent(Isolate* isolate) {
+  static constexpr int kModeMask =
+      RelocInfo::AllRealModesMask() &
+      ~RelocInfo::ModeMask(RelocInfo::CONST_POOL) &
+      ~RelocInfo::ModeMask(RelocInfo::EXTERNAL_REFERENCE) &
+      ~RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE) &
+      ~RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE_ENCODED) &
+      ~RelocInfo::ModeMask(RelocInfo::OFF_HEAP_TARGET) &
+      ~RelocInfo::ModeMask(RelocInfo::RUNTIME_ENTRY) &
+      ~RelocInfo::ModeMask(RelocInfo::VENEER_POOL);
+  STATIC_ASSERT(kModeMask ==
+                (RelocInfo::ModeMask(RelocInfo::CODE_TARGET) |
+                 RelocInfo::ModeMask(RelocInfo::RELATIVE_CODE_TARGET) |
+                 RelocInfo::ModeMask(RelocInfo::COMPRESSED_EMBEDDED_OBJECT) |
+                 RelocInfo::ModeMask(RelocInfo::FULL_EMBEDDED_OBJECT) |
+                 RelocInfo::ModeMask(RelocInfo::WASM_CALL) |
+                 RelocInfo::ModeMask(RelocInfo::WASM_STUB_CALL)));
+
+  bool is_independent = true;
+  for (RelocIterator it(*this, kModeMask); !it.done(); it.next()) {
+    if (RelocInfo::IsEmbeddedObjectMode(it.rinfo()->rmode())) {
+      HeapObject o = it.rinfo()->target_object();
+      // TODO(jgruber,v8:8888): Extend this with further NCI objects,
+      // and define a more systematic
+      // IsNativeContextIndependent<T>() predicate.
+      if (o.IsString()) continue;
+      if (o.IsScopeInfo()) continue;
+      if (o.IsHeapNumber()) continue;
+      if (o.IsBigInt()) continue;
+      if (o.IsSharedFunctionInfo()) continue;
+      if (o.IsArrayBoilerplateDescription()) continue;
+      if (o.IsObjectBoilerplateDescription()) continue;
+      if (o.IsTemplateObjectDescription()) continue;
+      if (o.IsFixedArray()) {
+        // Some uses of FixedArray are valid.
+        // 1. Passed as arg to %DeclareGlobals, contains only strings
+        //    and SFIs.
+        // 2. Passed as arg to %DefineClass. No well defined contents.
+        // .. ?
+        // TODO(jgruber): Consider assigning dedicated instance
+        //    types instead of assuming fixed arrays are okay.
+        continue;
+      }
+      // Other objects are expected to be context-dependent.
+      PrintF("Found native-context-dependent object:\n");
+      o.Print();
+      o.map().Print();
+    }
+    is_independent = false;
   }
 
-  return is_process_independent;
+  return is_independent;
 }
 
 bool Code::Inlines(SharedFunctionInfo sfi) {
@@ -840,8 +909,8 @@ void BytecodeArray::MakeOlder() {
   DCHECK_LE(RoundDown(age_addr, kTaggedSize) + kTaggedSize, address() + Size());
   Age age = bytecode_age();
   if (age < kLastBytecodeAge) {
-    base::AsAtomic8::Release_CompareAndSwap(reinterpret_cast<byte*>(age_addr),
-                                            age, age + 1);
+    base::AsAtomic8::Relaxed_CompareAndSwap(
+        reinterpret_cast<base::Atomic8*>(age_addr), age, age + 1);
   }
 
   DCHECK_GE(bytecode_age(), kFirstBytecodeAge);
@@ -1010,11 +1079,22 @@ void Code::SetMarkedForDeoptimization(const char* reason) {
       (deoptimization_data() != GetReadOnlyRoots().empty_fixed_array())) {
     DeoptimizationData deopt_data =
         DeoptimizationData::cast(deoptimization_data());
-    CodeTracer::Scope scope(GetIsolate()->GetCodeTracer());
-    PrintF(scope.file(),
-           "[marking dependent code " V8PRIxPTR_FMT
-           " (opt #%d) for deoptimization, reason: %s]\n",
-           ptr(), deopt_data.OptimizationId().value(), reason);
+    auto isolate = GetIsolate();
+    CodeTracer::Scope scope(isolate->GetCodeTracer());
+    PrintF(scope.file(), "[marking dependent code " V8PRIxPTR_FMT " ", ptr());
+    deopt_data.SharedFunctionInfo().ShortPrint(scope.file());
+    PrintF(" (opt #%d) for deoptimization, reason: %s]\n",
+           deopt_data.OptimizationId().value(), reason);
+    {
+      HandleScope scope(isolate);
+      PROFILE(
+          isolate,
+          CodeDependencyChangeEvent(
+              handle(*this, isolate),
+              handle(SharedFunctionInfo::cast(deopt_data.SharedFunctionInfo()),
+                     isolate),
+              reason));
+    }
   }
 }
 

@@ -464,6 +464,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
  public:
   using HandleScopeType = HandleScope;
+  void* operator new(size_t) = delete;
+  void operator delete(void*) = delete;
 
   // A thread has a PerIsolateThreadData instance for each isolate that it has
   // entered. That instance is allocated when the isolate is initially entered
@@ -606,6 +608,11 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // Mutex for serializing access to break control structures.
   base::RecursiveMutex* break_access() { return &break_access_; }
 
+  // Shared mutex for allowing concurrent read/writes to TransitionArrays.
+  base::SharedMutex* transition_array_access() {
+    return &transition_array_access_;
+  }
+
   Address get_address_from_id(IsolateAddressId id);
 
   // Access to top context (where the current function object was created).
@@ -731,6 +738,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   void SetCaptureStackTraceForUncaughtExceptions(
       bool capture, int frame_limit, StackTrace::StackTraceOptions options);
+  bool get_capture_stack_trace_for_uncaught_exceptions() const;
 
   void SetAbortOnUncaughtExceptionCallback(
       v8::Isolate::AbortOnUncaughtExceptionCallback callback);
@@ -942,6 +950,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   }
 
   RootsTable& roots_table() { return isolate_data()->roots(); }
+  const RootsTable& roots_table() const { return isolate_data()->roots(); }
 
   // A sub-region of the Isolate object that has "predictable" layout which
   // depends only on the pointer size and therefore it's guaranteed that there
@@ -1291,6 +1300,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   int GetNextScriptId();
 
+  int GetNextStackFrameInfoId();
+
 #if V8_SFI_HAS_UNIQUE_ID
   int GetNextUniqueSharedFunctionInfoId() {
     int current_id = next_unique_sfi_id_.load(std::memory_order_relaxed);
@@ -1424,7 +1435,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   void SetHostInitializeImportMetaObjectCallback(
       HostInitializeImportMetaObjectCallback callback);
-  Handle<JSObject> RunHostInitializeImportMetaObjectCallback(
+  MaybeHandle<JSObject> RunHostInitializeImportMetaObjectCallback(
       Handle<SourceTextModule> module);
 
   void RegisterEmbeddedFileWriter(EmbeddedFileWriterInterface* writer) {
@@ -1516,6 +1527,9 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   void AddCodeRange(Address begin, size_t length_in_bytes);
 
   bool RequiresCodeRange() const;
+
+  static Address load_from_stack_count_address(const char* function_name);
+  static Address store_to_stack_count_address(const char* function_name);
 
  private:
   explicit Isolate(std::unique_ptr<IsolateAllocator> isolate_allocator);
@@ -1635,6 +1649,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   CompilationCache* compilation_cache_ = nullptr;
   std::shared_ptr<Counters> async_counters_;
   base::RecursiveMutex break_access_;
+  base::SharedMutex transition_array_access_;
   Logger* logger_ = nullptr;
   StubCache* load_stub_cache_ = nullptr;
   StubCache* store_stub_cache_ = nullptr;
@@ -1860,8 +1875,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // Delete new/delete operators to ensure that Isolate::New() and
   // Isolate::Delete() are used for Isolate creation and deletion.
   void* operator new(size_t, void* ptr) { return ptr; }
-  void* operator new(size_t) = delete;
-  void operator delete(void*) = delete;
 
   friend class heap::HeapTester;
   friend class TestSerializer;

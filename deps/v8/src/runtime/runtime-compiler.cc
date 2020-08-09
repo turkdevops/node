@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "src/asmjs/asm-js.h"
+#include "src/codegen/compilation-cache.h"
 #include "src/codegen/compiler.h"
 #include "src/common/message-template.h"
 #include "src/compiler-dispatcher/optimizing-compile-dispatcher.h"
@@ -24,8 +25,10 @@ RUNTIME_FUNCTION(Runtime_CompileLazy) {
   DCHECK_EQ(1, args.length());
   CONVERT_ARG_HANDLE_CHECKED(JSFunction, function, 0);
 
+  Handle<SharedFunctionInfo> sfi(function->shared(), isolate);
+
 #ifdef DEBUG
-  if (FLAG_trace_lazy && !function->shared().is_compiled()) {
+  if (FLAG_trace_lazy && !sfi->is_compiled()) {
     PrintF("[unoptimized: ");
     function->PrintName();
     PrintF("]\n");
@@ -40,6 +43,15 @@ RUNTIME_FUNCTION(Runtime_CompileLazy) {
   if (!Compiler::Compile(function, Compiler::KEEP_EXCEPTION,
                          &is_compiled_scope)) {
     return ReadOnlyRoots(isolate).exception();
+  }
+  if (sfi->may_have_cached_code()) {
+    Handle<Code> code;
+    if (sfi->TryGetCachedCode(isolate).ToHandle(&code)) {
+      function->set_code(*code);
+      JSFunction::EnsureFeedbackVector(function, &is_compiled_scope);
+      if (FLAG_trace_turbo_nci) CompilationCacheCode::TraceHit(sfi, code);
+      return *code;
+    }
   }
   DCHECK(function->is_compiled());
   return function->code();
@@ -157,6 +169,7 @@ RUNTIME_FUNCTION(Runtime_NotifyDeoptimized) {
   // code object from deoptimizer.
   Handle<Code> optimized_code = deoptimizer->compiled_code();
   DeoptimizeKind type = deoptimizer->deopt_kind();
+  bool should_reuse_code = deoptimizer->should_reuse_code();
 
   // TODO(turbofan): We currently need the native context to materialize
   // the arguments object, but only to get to its map.
@@ -171,8 +184,7 @@ RUNTIME_FUNCTION(Runtime_NotifyDeoptimized) {
   JavaScriptFrame* top_frame = top_it.frame();
   isolate->set_context(Context::cast(top_frame->context()));
 
-  int count = optimized_code->deoptimization_count();
-  if (type == DeoptimizeKind::kSoft && count < FLAG_reuse_opt_code_count) {
+  if (should_reuse_code) {
     optimized_code->increment_deoptimization_count();
     return ReadOnlyRoots(isolate).undefined_value();
   }
@@ -390,5 +402,6 @@ RUNTIME_FUNCTION(Runtime_ResolvePossiblyDirectEval) {
   return CompileGlobalEval(isolate, args.at<Object>(1), outer_info,
                            language_mode, args.smi_at(4), args.smi_at(5));
 }
+
 }  // namespace internal
 }  // namespace v8

@@ -88,6 +88,8 @@ Reduction JSIntrinsicLowering::Reduce(Node* node) {
       return ReduceCall(node);
     case Runtime::kInlineIncBlockCounter:
       return ReduceIncBlockCounter(node);
+    case Runtime::kInlineGetImportMetaObject:
+      return ReduceGetImportMetaObject(node);
     default:
       break;
   }
@@ -330,8 +332,15 @@ Reduction JSIntrinsicLowering::ReduceToString(Node* node) {
 
 
 Reduction JSIntrinsicLowering::ReduceCall(Node* node) {
-  size_t const arity = CallRuntimeParametersOf(node->op()).arity();
-  NodeProperties::ChangeOp(node, javascript()->Call(arity));
+  int const arity =
+      static_cast<int>(CallRuntimeParametersOf(node->op()).arity());
+  static constexpr int kTargetAndReceiver = 2;
+  STATIC_ASSERT(JSCallNode::kFeedbackVectorIsLastInput);
+  Node* feedback = jsgraph()->UndefinedConstant();
+  node->InsertInput(graph()->zone(), arity, feedback);
+  NodeProperties::ChangeOp(
+      node,
+      javascript()->Call(JSCallNode::ArityForArgc(arity - kTargetAndReceiver)));
   return Changed(node);
 }
 
@@ -341,6 +350,11 @@ Reduction JSIntrinsicLowering::ReduceIncBlockCounter(Node* node) {
   return Change(node,
                 Builtins::CallableFor(isolate(), Builtins::kIncBlockCounter), 0,
                 kDoesNotNeedFrameState);
+}
+
+Reduction JSIntrinsicLowering::ReduceGetImportMetaObject(Node* node) {
+  NodeProperties::ChangeOp(node, javascript()->GetImportMeta());
+  return Changed(node);
 }
 
 Reduction JSIntrinsicLowering::Change(Node* node, const Operator* op, Node* a,

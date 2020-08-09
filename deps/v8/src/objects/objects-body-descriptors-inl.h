@@ -601,6 +601,24 @@ class Foreign::BodyDescriptor final : public BodyDescriptorBase {
   static inline int SizeOf(Map map, HeapObject object) { return kSize; }
 };
 
+class WasmTypeInfo::BodyDescriptor final : public BodyDescriptorBase {
+ public:
+  static bool IsValidSlot(Map map, HeapObject obj, int offset) {
+    UNREACHABLE();
+  }
+
+  template <typename ObjectVisitor>
+  static inline void IterateBody(Map map, HeapObject obj, int object_size,
+                                 ObjectVisitor* v) {
+    Foreign::BodyDescriptor::IterateBody<ObjectVisitor>(map, obj, object_size,
+                                                        v);
+    IteratePointer(obj, kParentOffset, v);
+    IteratePointer(obj, kSubtypesOffset, v);
+  }
+
+  static inline int SizeOf(Map map, HeapObject object) { return kSize; }
+};
+
 class ExternalOneByteString::BodyDescriptor final : public BodyDescriptorBase {
  public:
   static bool IsValidSlot(Map map, HeapObject obj, int offset) { return false; }
@@ -811,7 +829,7 @@ class WasmArray::BodyDescriptor final : public BodyDescriptorBase {
   template <typename ObjectVisitor>
   static inline void IterateBody(Map map, HeapObject obj, int object_size,
                                  ObjectVisitor* v) {
-    if (!WasmArray::type(map)->element_type().IsReferenceType()) return;
+    if (!WasmArray::type(map)->element_type().is_reference_type()) return;
     IteratePointers(obj, WasmArray::kHeaderSize, object_size, v);
   }
 
@@ -835,7 +853,7 @@ class WasmStruct::BodyDescriptor final : public BodyDescriptorBase {
     WasmStruct wasm_struct = WasmStruct::cast(obj);
     wasm::StructType* type = WasmStruct::GcSafeType(map);
     for (uint32_t i = 0; i < type->field_count(); i++) {
-      if (!type->field(i).IsReferenceType()) continue;
+      if (!type->field(i).is_reference_type()) continue;
       int offset =
           WasmStruct::kHeaderSize + static_cast<int>(type->field_offset(i));
       v->VisitPointer(wasm_struct, wasm_struct.RawField(offset));
@@ -970,6 +988,8 @@ ReturnType BodyDescriptorApply(InstanceType type, T1 p1, T2 p2, T3 p3, T4 p4) {
       return Op::template apply<WasmArray::BodyDescriptor>(p1, p2, p3, p4);
     case WASM_STRUCT_TYPE:
       return Op::template apply<WasmStruct::BodyDescriptor>(p1, p2, p3, p4);
+    case WASM_TYPE_INFO_TYPE:
+      return Op::template apply<WasmTypeInfo::BodyDescriptor>(p1, p2, p3, p4);
     case JS_OBJECT_TYPE:
     case JS_ERROR_TYPE:
     case JS_ARGUMENTS_OBJECT_TYPE:
@@ -981,7 +1001,6 @@ ReturnType BodyDescriptorApply(InstanceType type, T1 p1, T2 p2, T3 p3, T4 p4) {
     case JS_ASYNC_GENERATOR_OBJECT_TYPE:
     case JS_PRIMITIVE_WRAPPER_TYPE:
     case JS_DATE_TYPE:
-    case JS_AGGREGATE_ERROR_TYPE:
     case JS_ARRAY_TYPE:
     case JS_ARRAY_ITERATOR_TYPE:
     case JS_MODULE_NAMESPACE_TYPE:

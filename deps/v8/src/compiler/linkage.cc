@@ -74,7 +74,7 @@ MachineSignature* CallDescriptor::GetMachineSignature(Zone* zone) const {
   for (size_t i = 0; i < param_count; ++i) {
     types[current++] = GetParameterType(i);
   }
-  return new (zone) MachineSignature(return_count, param_count, types);
+  return zone->New<MachineSignature>(return_count, param_count, types);
 }
 
 int CallDescriptor::GetFirstUnusedStackSlot() const {
@@ -180,7 +180,7 @@ bool Linkage::NeedsFrameStateInput(Runtime::FunctionId function) {
   switch (function) {
     // Most runtime functions need a FrameState. A few chosen ones that we know
     // not to call into arbitrary JavaScript, not to throw, and not to lazily
-    // deoptimize are whitelisted here and can be called without a FrameState.
+    // deoptimize are allowlisted here and can be called without a FrameState.
     case Runtime::kAbort:
     case Runtime::kAllocateInOldGeneration:
     case Runtime::kCreateIterResultObject:
@@ -218,7 +218,7 @@ bool Linkage::NeedsFrameStateInput(Runtime::FunctionId function) {
       break;
   }
 
-  // For safety, default to needing a FrameState unless whitelisted.
+  // For safety, default to needing a FrameState unless allowlisted.
   return true;
 }
 
@@ -253,7 +253,7 @@ CallDescriptor* Linkage::GetRuntimeCallDescriptor(
 CallDescriptor* Linkage::GetCEntryStubCallDescriptor(
     Zone* zone, int return_count, int js_parameter_count,
     const char* debug_name, Operator::Properties properties,
-    CallDescriptor::Flags flags) {
+    CallDescriptor::Flags flags, StackArgumentOrder stack_order) {
   const size_t function_count = 1;
   const size_t num_args_count = 1;
   const size_t context_count = 1;
@@ -295,7 +295,7 @@ CallDescriptor* Linkage::GetCEntryStubCallDescriptor(
   MachineType target_type = MachineType::AnyTagged();
   LinkageLocation target_loc =
       LinkageLocation::ForAnyRegister(MachineType::AnyTagged());
-  return new (zone) CallDescriptor(     // --
+  return zone->New<CallDescriptor>(     // --
       CallDescriptor::kCallCodeObject,  // kind
       target_type,                      // target MachineType
       target_loc,                       // target location
@@ -305,7 +305,8 @@ CallDescriptor* Linkage::GetCEntryStubCallDescriptor(
       kNoCalleeSaved,                   // callee-saved
       kNoCalleeSaved,                   // callee-saved fp
       flags,                            // flags
-      debug_name);                      // debug name
+      debug_name,                       // debug name
+      stack_order);                     // stack order
 }
 
 CallDescriptor* Linkage::GetJSCallDescriptor(Zone* zone, bool is_osr,
@@ -325,7 +326,11 @@ CallDescriptor* Linkage::GetJSCallDescriptor(Zone* zone, bool is_osr,
 
   // All parameters to JS calls go on the stack.
   for (int i = 0; i < js_parameter_count; i++) {
+#ifdef V8_REVERSE_JSARGS
+    int spill_slot_index = -i - 1;
+#else
     int spill_slot_index = i - js_parameter_count;
+#endif
     locations.AddParam(LinkageLocation::ForCallerFrameSlot(
         spill_slot_index, MachineType::AnyTagged()));
   }
@@ -348,7 +353,7 @@ CallDescriptor* Linkage::GetJSCallDescriptor(Zone* zone, bool is_osr,
   LinkageLocation target_loc =
       is_osr ? LinkageLocation::ForSavedCallerFunction()
              : regloc(kJSFunctionRegister, MachineType::AnyTagged());
-  return new (zone) CallDescriptor(     // --
+  return zone->New<CallDescriptor>(     // --
       CallDescriptor::kCallJSFunction,  // kind
       target_type,                      // target MachineType
       target_loc,                       // target location
@@ -358,7 +363,7 @@ CallDescriptor* Linkage::GetJSCallDescriptor(Zone* zone, bool is_osr,
       kNoCalleeSaved,                   // callee-saved
       kNoCalleeSaved,                   // callee-saved fp
       flags,                            // flags
-      "js-call");
+      "js-call");                       // debug name
 }
 
 // TODO(turbofan): cache call descriptors for code stub calls.
@@ -447,7 +452,7 @@ CallDescriptor* Linkage::GetStubCallDescriptor(
   }
 
   LinkageLocation target_loc = LinkageLocation::ForAnyRegister(target_type);
-  return new (zone) CallDescriptor(          // --
+  return zone->New<CallDescriptor>(          // --
       kind,                                  // kind
       target_type,                           // target MachineType
       target_loc,                            // target location
@@ -458,6 +463,7 @@ CallDescriptor* Linkage::GetStubCallDescriptor(
       kNoCalleeSaved,                        // callee-saved fp
       CallDescriptor::kCanUseRoots | flags,  // flags
       descriptor.DebugName(),                // debug name
+      descriptor.GetStackArgumentOrder(),    // stack order
       descriptor.allocatable_registers());
 }
 
@@ -493,7 +499,7 @@ CallDescriptor* Linkage::GetBytecodeDispatchCallDescriptor(
   LinkageLocation target_loc = LinkageLocation::ForAnyRegister(target_type);
   const CallDescriptor::Flags kFlags =
       CallDescriptor::kCanUseRoots | CallDescriptor::kFixedTargetRegister;
-  return new (zone) CallDescriptor(  // --
+  return zone->New<CallDescriptor>(  // --
       CallDescriptor::kCallAddress,  // kind
       target_type,                   // target MachineType
       target_loc,                    // target location

@@ -15,6 +15,7 @@
 #include "src/wasm/struct-types.h"
 #include "src/wasm/wasm-constants.h"
 #include "src/wasm/wasm-opcodes.h"
+#include "src/zone/zone-containers.h"
 
 namespace v8 {
 
@@ -90,7 +91,7 @@ struct WasmException {
 struct WasmDataSegment {
   // Construct an active segment.
   explicit WasmDataSegment(WasmInitExpr dest_addr)
-      : dest_addr(dest_addr), active(true) {}
+      : dest_addr(std::move(dest_addr)), active(true) {}
 
   // Construct a passive segment, which has no dest_addr.
   WasmDataSegment() : active(false) {}
@@ -117,15 +118,15 @@ struct WasmElemSegment {
 
   // Construct an active segment.
   WasmElemSegment(uint32_t table_index, WasmInitExpr offset)
-      : type(kWasmFuncRef),
+      : type(ValueType::Ref(HeapType::kFunc, kNullable)),
         table_index(table_index),
-        offset(offset),
+        offset(std::move(offset)),
         status(kStatusActive) {}
 
   // Construct a passive or declarative segment, which has no table index or
   // offset.
   explicit WasmElemSegment(bool declarative)
-      : type(kWasmFuncRef),
+      : type(ValueType::Ref(HeapType::kFunc, kNullable)),
         table_index(0),
         status(declarative ? kStatusDeclarative : kStatusPassive) {}
 
@@ -206,7 +207,7 @@ class V8_EXPORT_PRIVATE LazilyGeneratedNames {
   void AddForTesting(int function_index, WireBytesRef name);
 
  private:
-  // {function_names_}, {global_names_} and {memory_names_} are
+  // {function_names_}, {global_names_}, {memory_names_} and {table_names_} are
   // populated lazily after decoding, and therefore need a mutex to protect
   // concurrent modifications from multiple {WasmModuleObject}.
   mutable base::Mutex mutex_;
@@ -218,6 +219,9 @@ class V8_EXPORT_PRIVATE LazilyGeneratedNames {
   mutable std::unique_ptr<
       std::unordered_map<uint32_t, std::pair<WireBytesRef, WireBytesRef>>>
       memory_names_;
+  mutable std::unique_ptr<
+      std::unordered_map<uint32_t, std::pair<WireBytesRef, WireBytesRef>>>
+      table_names_;
 };
 
 class V8_EXPORT_PRIVATE AsmJsOffsetInformation {
@@ -327,6 +331,29 @@ struct V8_EXPORT_PRIVATE WasmModule {
   bool has_array(uint32_t index) const {
     return index < types.size() && type_kinds[index] == kWasmArrayTypeCode;
   }
+  base::RecursiveMutex* type_cache_mutex() const { return &type_cache_mutex_; }
+  bool is_cached_subtype(uint32_t subtype, uint32_t supertype) const {
+    return subtyping_cache->count(std::make_pair(subtype, supertype)) == 1;
+  }
+  void cache_subtype(uint32_t subtype, uint32_t supertype) const {
+    subtyping_cache->emplace(subtype, supertype);
+  }
+  void uncache_subtype(uint32_t subtype, uint32_t supertype) const {
+    subtyping_cache->erase(std::make_pair(subtype, supertype));
+  }
+  bool is_cached_equivalent_type(uint32_t type1, uint32_t type2) const {
+    if (type1 > type2) std::swap(type1, type2);
+    return type_equivalence_cache->count(std::make_pair(type1, type2)) == 1;
+  }
+  void cache_type_equivalence(uint32_t type1, uint32_t type2) const {
+    if (type1 > type2) std::swap(type1, type2);
+    type_equivalence_cache->emplace(type1, type2);
+  }
+  void uncache_type_equivalence(uint32_t type1, uint32_t type2) const {
+    if (type1 > type2) std::swap(type1, type2);
+    type_equivalence_cache->erase(std::make_pair(type1, type2));
+  }
+
   std::vector<WasmFunction> functions;
   std::vector<WasmDataSegment> data_segments;
   std::vector<WasmTable> tables;
@@ -347,6 +374,18 @@ struct V8_EXPORT_PRIVATE WasmModule {
 
   explicit WasmModule(std::unique_ptr<Zone> signature_zone = nullptr);
 
+ private:
+  // Cache for discovered subtyping pairs.
+  std::unique_ptr<ZoneUnorderedSet<std::pair<uint32_t, uint32_t>>>
+      subtyping_cache;
+  // Cache for discovered equivalent type pairs.
+  // Indexes are stored in increasing order.
+  std::unique_ptr<ZoneUnorderedSet<std::pair<uint32_t, uint32_t>>>
+      type_equivalence_cache;
+  // The above two caches are used from background compile jobs, so they
+  // must be protected from concurrent modifications:
+  mutable base::RecursiveMutex type_cache_mutex_;
+
   DISALLOW_COPY_AND_ASSIGN(WasmModule);
 };
 
@@ -363,6 +402,10 @@ V8_EXPORT_PRIVATE int MaxNumExportWrappers(const WasmModule* module);
 // and origin defined by {is_import}.
 int GetExportWrapperIndex(const WasmModule* module, const FunctionSig* sig,
                           bool is_import);
+
+// Returns the index of the canonical RTT of the given struct/array type
+// in the instance's list of canonical RTTs.
+int GetCanonicalRttIndex(const WasmModule* module, uint32_t type_index);
 
 // Return the byte offset of the function identified by the given index.
 // The offset will be relative to the start of the module bytes.

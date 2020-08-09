@@ -453,11 +453,14 @@ class ArrayList : public TorqueGeneratedArrayList<ArrayList, FixedArray> {
   // number returned by Length() is stored in the first entry.
   static Handle<FixedArray> Elements(Isolate* isolate, Handle<ArrayList> array);
 
+  static const int kHeaderFields = 1;
+
  private:
   static Handle<ArrayList> EnsureSpace(Isolate* isolate,
                                        Handle<ArrayList> array, int length);
   static const int kLengthIndex = 0;
   static const int kFirstIndex = 1;
+  STATIC_ASSERT(kHeaderFields == kFirstIndex);
   TQ_OBJECT_CONSTRUCTORS(ArrayList)
 };
 
@@ -465,7 +468,8 @@ enum SearchMode { ALL_ENTRIES, VALID_ENTRIES };
 
 template <SearchMode search_mode, typename T>
 inline int Search(T* array, Name name, int valid_entries = 0,
-                  int* out_insertion_index = nullptr);
+                  int* out_insertion_index = nullptr,
+                  bool concurrent_search = false);
 
 // ByteArray represents fixed sized byte arrays.  Used for the relocation info
 // that is attached to code objects.

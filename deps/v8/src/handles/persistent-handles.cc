@@ -40,6 +40,23 @@ void PersistentHandles::Detach() {
   DCHECK_NOT_NULL(owner_);
   owner_ = nullptr;
 }
+
+void PersistentHandles::CheckOwnerIsNotParked() {
+  if (owner_) DCHECK(!owner_->IsParked());
+}
+
+bool PersistentHandles::Contains(Address* location) {
+  auto it = ordered_blocks_.upper_bound(location);
+  if (it == ordered_blocks_.begin()) return false;
+  --it;
+  DCHECK_LE(*it, location);
+  if (*it == blocks_.back()) {
+    // The last block is a special case because it may have
+    // less than block_size_ handles.
+    return location < block_next_;
+  }
+  return location < *it + block_size_;
+}
 #endif
 
 void PersistentHandles::AddBlock() {
@@ -50,13 +67,10 @@ void PersistentHandles::AddBlock() {
 
   block_next_ = block_start;
   block_limit_ = block_start + block_size_;
-}
 
-Handle<Object> PersistentHandles::NewHandle(Address value) {
 #ifdef DEBUG
-  if (owner_) DCHECK(!owner_->IsParked());
+  ordered_blocks_.insert(block_start);
 #endif
-  return Handle<Object>(GetHandle(value));
 }
 
 Address* PersistentHandles::GetHandle(Address value) {

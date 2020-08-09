@@ -820,7 +820,10 @@ void Debug::ClearAllBreakPoints() {
       HeapObject raw_wasm_script;
       if (wasm_scripts_with_breakpoints_->Get(idx).GetHeapObject(
               &raw_wasm_script)) {
-        WasmScript::ClearAllBreakpoints(Script::cast(raw_wasm_script));
+        Script wasm_script = Script::cast(raw_wasm_script);
+        WasmScript::ClearAllBreakpoints(wasm_script);
+        wasm_script.wasm_native_module()->GetDebugInfo()->RemoveIsolate(
+            isolate_);
       }
     }
     wasm_scripts_with_breakpoints_ = Handle<WeakArrayList>{};
@@ -1425,7 +1428,7 @@ bool Debug::GetPossibleBreakpoints(Handle<Script> script, int start_position,
 
     bool was_compiled = false;
     for (const auto& candidate : candidates) {
-      IsCompiledScope is_compiled_scope(candidate->is_compiled_scope());
+      IsCompiledScope is_compiled_scope(candidate->is_compiled_scope(isolate_));
       if (!is_compiled_scope.is_compiled()) {
         // Code that cannot be compiled lazily are internal and not debuggable.
         DCHECK(candidate->allows_lazy_compilation());
@@ -1530,7 +1533,7 @@ Handle<Object> Debug::FindSharedFunctionInfoInScript(Handle<Script> script,
       shared = finder.Result();
       if (shared.is_null()) break;
       // We found it if it's already compiled.
-      is_compiled_scope = shared.is_compiled_scope();
+      is_compiled_scope = shared.is_compiled_scope(isolate_);
       if (is_compiled_scope.is_compiled()) {
         Handle<SharedFunctionInfo> shared_handle(shared, isolate_);
         // If the iteration count is larger than 1, we had to compile the outer
@@ -1564,7 +1567,7 @@ bool Debug::EnsureBreakInfo(Handle<SharedFunctionInfo> shared) {
   if (!shared->IsSubjectToDebugging() && !CanBreakAtEntry(shared)) {
     return false;
   }
-  IsCompiledScope is_compiled_scope = shared->is_compiled_scope();
+  IsCompiledScope is_compiled_scope = shared->is_compiled_scope(isolate_);
   if (!is_compiled_scope.is_compiled() &&
       !Compiler::Compile(shared, Compiler::CLEAR_EXCEPTION,
                          &is_compiled_scope)) {
@@ -2269,7 +2272,8 @@ bool Debug::PerformSideEffectCheck(Handle<JSFunction> function,
                                    Handle<Object> receiver) {
   DCHECK_EQ(isolate_->debug_execution_mode(), DebugInfo::kSideEffects);
   DisallowJavascriptExecution no_js(isolate_);
-  IsCompiledScope is_compiled_scope(function->shared().is_compiled_scope());
+  IsCompiledScope is_compiled_scope(
+      function->shared().is_compiled_scope(isolate_));
   if (!function->is_compiled() &&
       !Compiler::Compile(function, Compiler::KEEP_EXCEPTION,
                          &is_compiled_scope)) {
@@ -2327,7 +2331,7 @@ bool Debug::PerformSideEffectCheckForCallback(
   // TODO(7515): always pass a valid callback info object.
   if (!callback_info.is_null()) {
     if (callback_info->IsAccessorInfo()) {
-      // List of whitelisted internal accessors can be found in accessors.h.
+      // List of allowlisted internal accessors can be found in accessors.h.
       AccessorInfo info = AccessorInfo::cast(*callback_info);
       DCHECK_NE(kNotAccessor, accessor_kind);
       switch (accessor_kind == kSetter ? info.setter_side_effect_type()

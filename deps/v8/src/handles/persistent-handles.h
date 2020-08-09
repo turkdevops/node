@@ -31,15 +31,31 @@ class PersistentHandles {
 
   void Iterate(RootVisitor* visitor);
 
-  V8_EXPORT_PRIVATE Handle<Object> NewHandle(Address value);
+  template <typename T>
+  Handle<T> NewHandle(T obj) {
+#ifdef DEBUG
+    CheckOwnerIsNotParked();
+#endif
+    return Handle<T>(GetHandle(obj.ptr()));
+  }
+
+  template <typename T>
+  Handle<T> NewHandle(Handle<T> obj) {
+    return NewHandle(*obj);
+  }
+
+#ifdef DEBUG
+  bool Contains(Address* location);
+#endif
 
  private:
   void AddBlock();
-  Address* GetHandle(Address value);
+  V8_EXPORT_PRIVATE Address* GetHandle(Address value);
 
 #ifdef DEBUG
   void Attach(LocalHeap* local_heap);
   void Detach();
+  V8_EXPORT_PRIVATE void CheckOwnerIsNotParked();
 
   LocalHeap* owner_ = nullptr;
 
@@ -57,6 +73,10 @@ class PersistentHandles {
 
   PersistentHandles* prev_;
   PersistentHandles* next_;
+
+#ifdef DEBUG
+  std::set<Address*> ordered_blocks_;
+#endif
 
   friend class PersistentHandlesList;
   friend class LocalHeap;

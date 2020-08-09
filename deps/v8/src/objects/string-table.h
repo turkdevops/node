@@ -47,10 +47,9 @@ class V8_EXPORT_PRIVATE StringTableShape : public BaseShape<StringTableKey*> {
 
   static inline Handle<Object> AsHandle(Isolate* isolate, Key key);
 
-  static inline Handle<Map> GetMap(ReadOnlyRoots roots);
-
   static const int kPrefixSize = 0;
   static const int kEntrySize = 1;
+  static const bool kMatchNeedsHoleCheck = true;
 };
 
 class SeqOneByteString;
@@ -64,6 +63,8 @@ EXTERN_DECLARE_HASH_TABLE(StringTable, StringTableShape)
 class V8_EXPORT_PRIVATE StringTable
     : public HashTable<StringTable, StringTableShape> {
  public:
+  static inline Handle<Map> GetMap(ReadOnlyRoots roots);
+
   // Find string in the string table. If it is not there yet, it is
   // added. The return value is the string found.
   static Handle<String> LookupString(Isolate* isolate, Handle<String> key);
@@ -105,6 +106,7 @@ class StringSetShape : public BaseShape<String> {
 
   static const int kPrefixSize = 0;
   static const int kEntrySize = 1;
+  static const bool kMatchNeedsHoleCheck = true;
 };
 
 EXTERN_DECLARE_HASH_TABLE(StringSet, StringSetShape)
@@ -113,7 +115,7 @@ class StringSet : public HashTable<StringSet, StringSetShape> {
  public:
   V8_EXPORT_PRIVATE static Handle<StringSet> New(Isolate* isolate);
   V8_EXPORT_PRIVATE static Handle<StringSet> Add(Isolate* isolate,
-                                                 Handle<StringSet> blacklist,
+                                                 Handle<StringSet> stringset,
                                                  Handle<String> name);
   V8_EXPORT_PRIVATE bool Has(Isolate* isolate, Handle<String> name);
 

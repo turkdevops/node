@@ -67,10 +67,6 @@ int PropertyDetails::field_width_in_words() const {
   return representation().IsDouble() ? kDoubleSize / kTaggedSize : 1;
 }
 
-DEF_GETTER(HeapObject, IsSloppyArgumentsElements, bool) {
-  return IsFixedArrayExact(isolate);
-}
-
 DEF_GETTER(HeapObject, IsClassBoilerplate, bool) {
   return IsFixedArrayExact(isolate);
 }
@@ -713,7 +709,7 @@ void HeapObject::set_map(Map value) {
   if (!value.is_null()) {
     // TODO(1600) We are passing kNullAddress as a slot because maps can never
     // be on an evacuation candidate.
-    MarkingBarrier(*this, ObjectSlot(kNullAddress), value);
+    WriteBarrier::Marking(*this, ObjectSlot(kNullAddress), value);
   }
 #endif
 }
@@ -733,7 +729,7 @@ void HeapObject::synchronized_set_map(Map value) {
   if (!value.is_null()) {
     // TODO(1600) We are passing kNullAddress as a slot because maps can never
     // be on an evacuation candidate.
-    MarkingBarrier(*this, ObjectSlot(kNullAddress), value);
+    WriteBarrier::Marking(*this, ObjectSlot(kNullAddress), value);
   }
 #endif
 }
@@ -755,7 +751,7 @@ void HeapObject::set_map_after_allocation(Map value, WriteBarrierMode mode) {
     DCHECK(!value.is_null());
     // TODO(1600) We are passing kNullAddress as a slot because maps can never
     // be on an evacuation candidate.
-    MarkingBarrier(*this, ObjectSlot(kNullAddress), value);
+    WriteBarrier::Marking(*this, ObjectSlot(kNullAddress), value);
   }
 #endif
 }

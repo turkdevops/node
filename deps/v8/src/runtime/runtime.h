@@ -329,6 +329,7 @@ namespace internal {
   F(SetDataProperties, 2, 1)                                    \
   F(SetKeyedProperty, 3, 1)                                     \
   F(SetNamedProperty, 3, 1)                                     \
+  F(SetOwnPropertyIgnoreAttributes, 4, 1)                       \
   F(StoreDataPropertyInLiteral, 3, 1)                           \
   F(ShrinkPropertyDictionary, 1, 1)                             \
   F(ToFastProperties, 1, 1)                                     \
@@ -459,6 +460,7 @@ namespace internal {
   F(ConstructDouble, 2, 1)                    \
   F(ConstructSlicedString, 2, 1)              \
   F(DebugPrint, 1, 1)                         \
+  F(DebugPrintPtr, 1, 1)                      \
   F(DebugTrace, 0, 1)                         \
   F(DebugTrackRetainingPath, -1, 1)           \
   F(DeoptimizeFunction, 1, 1)                 \
@@ -542,6 +544,8 @@ namespace internal {
   F(WasmTierDownModule, 1, 1)                 \
   F(WasmTierUpFunction, 2, 1)                 \
   F(WasmTierUpModule, 1, 1)                   \
+  F(WasmTraceEnter, 0, 1)                     \
+  F(WasmTraceExit, 1, 1)                      \
   F(WasmTraceMemory, 1, 1)                    \
   I(DeoptimizeNow, 0, 1)
 
@@ -571,9 +575,11 @@ namespace internal {
   F(WasmTableFill, 4, 1)              \
   F(WasmIsValidFuncRefValue, 1, 1)    \
   F(WasmCompileLazy, 2, 1)            \
-  F(WasmDebugBreak, 0, 1)
+  F(WasmDebugBreak, 0, 1)             \
+  F(WasmAllocateRtt, 2, 1)
 
 #define FOR_EACH_INTRINSIC_WEAKREF(F, I) \
+  F(JSWeakRefAddToKeptObjects, 1, 1)     \
   F(ShrinkFinalizationRegistryUnregisterTokenMap, 1, 1)
 
 #define FOR_EACH_INTRINSIC_RETURN_PAIR_IMPL(F, I) \
@@ -718,9 +724,9 @@ class Runtime : public AllStatic {
   // allocation.
   static bool MayAllocate(FunctionId id);
 
-  // Check if a runtime function with the given {id} is whitelisted for
+  // Check if a runtime function with the given {id} is allowlisted for
   // using it with fuzzers.
-  static bool IsWhitelistedForFuzzing(FunctionId id);
+  static bool IsAllowListedForFuzzing(FunctionId id);
 
   // Get the intrinsic function with the given name.
   static const Function* FunctionForName(const unsigned char* name, int length);

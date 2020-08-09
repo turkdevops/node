@@ -152,30 +152,30 @@ MachineRepresentation AtomicStoreRepresentationOf(Operator const* op)
 
 MachineType AtomicOpType(Operator const* op) V8_WARN_UNUSED_RESULT;
 
-class S8x16ShuffleParameter {
+class S128ImmediateParameter {
  public:
-  explicit S8x16ShuffleParameter(const uint8_t shuffle[16]) {
-    std::copy(shuffle, shuffle + 16, shuffle_.begin());
+  explicit S128ImmediateParameter(const uint8_t immediate[16]) {
+    std::copy(immediate, immediate + 16, immediate_.begin());
   }
-  const std::array<uint8_t, 16>& shuffle() const { return shuffle_; }
-  const uint8_t* data() const { return shuffle_.data(); }
-  uint8_t operator[](int x) const { return shuffle_[x]; }
+  const std::array<uint8_t, 16>& immediate() const { return immediate_; }
+  const uint8_t* data() const { return immediate_.data(); }
+  uint8_t operator[](int x) const { return immediate_[x]; }
 
  private:
-  std::array<uint8_t, 16> shuffle_;
+  std::array<uint8_t, 16> immediate_;
 };
 
-V8_EXPORT_PRIVATE bool operator==(S8x16ShuffleParameter const& lhs,
-                                  S8x16ShuffleParameter const& rhs);
-bool operator!=(S8x16ShuffleParameter const& lhs,
-                S8x16ShuffleParameter const& rhs);
+V8_EXPORT_PRIVATE bool operator==(S128ImmediateParameter const& lhs,
+                                  S128ImmediateParameter const& rhs);
+bool operator!=(S128ImmediateParameter const& lhs,
+                S128ImmediateParameter const& rhs);
 
-size_t hash_value(S8x16ShuffleParameter const& p);
+size_t hash_value(S128ImmediateParameter const& p);
 
 V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream&,
-                                           S8x16ShuffleParameter const&);
+                                           S128ImmediateParameter const&);
 
-V8_EXPORT_PRIVATE S8x16ShuffleParameter const& S8x16ShuffleParameterOf(
+V8_EXPORT_PRIVATE S128ImmediateParameter const& S128ImmediateParameterOf(
     Operator const* op) V8_WARN_UNUSED_RESULT;
 
 StackCheckKind StackCheckKindOf(Operator const* op) V8_WARN_UNUSED_RESULT;
@@ -576,6 +576,10 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   const Operator* F64x2Qfms();
   const Operator* F64x2Pmin();
   const Operator* F64x2Pmax();
+  const Operator* F64x2Ceil();
+  const Operator* F64x2Floor();
+  const Operator* F64x2Trunc();
+  const Operator* F64x2NearestInt();
 
   const Operator* F32x4Splat();
   const Operator* F32x4ExtractLane(int32_t);
@@ -602,6 +606,10 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   const Operator* F32x4Qfms();
   const Operator* F32x4Pmin();
   const Operator* F32x4Pmax();
+  const Operator* F32x4Ceil();
+  const Operator* F32x4Floor();
+  const Operator* F32x4Trunc();
+  const Operator* F32x4NearestInt();
 
   const Operator* I64x2Splat();
   const Operator* I64x2SplatI32Pair();
@@ -656,6 +664,7 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   const Operator* I32x4GeU();
   const Operator* I32x4Abs();
   const Operator* I32x4BitMask();
+  const Operator* I32x4DotI16x8S();
 
   const Operator* I16x8Splat();
   const Operator* I16x8ExtractLaneU(int32_t);
@@ -728,6 +737,7 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
 
   const Operator* S128Load();
   const Operator* S128Store();
+  const Operator* S128Const(const uint8_t value[16]);
 
   const Operator* S128Zero();
   const Operator* S128And();
@@ -740,14 +750,14 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   const Operator* S8x16Swizzle();
   const Operator* S8x16Shuffle(const uint8_t shuffle[16]);
 
-  const Operator* S1x2AnyTrue();
-  const Operator* S1x2AllTrue();
-  const Operator* S1x4AnyTrue();
-  const Operator* S1x4AllTrue();
-  const Operator* S1x8AnyTrue();
-  const Operator* S1x8AllTrue();
-  const Operator* S1x16AnyTrue();
-  const Operator* S1x16AllTrue();
+  const Operator* V64x2AnyTrue();
+  const Operator* V64x2AllTrue();
+  const Operator* V32x4AnyTrue();
+  const Operator* V32x4AllTrue();
+  const Operator* V16x8AnyTrue();
+  const Operator* V16x8AllTrue();
+  const Operator* V8x16AnyTrue();
+  const Operator* V8x16AllTrue();
 
   // load [base + index]
   const Operator* Load(LoadRepresentation rep);

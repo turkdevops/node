@@ -104,8 +104,14 @@ class LiftoffAssembler : public TurboAssembler {
     void MakeStack() { loc_ = kStack; }
 
     void MakeRegister(LiftoffRegister r) {
-      reg_ = r;
       loc_ = kRegister;
+      reg_ = r;
+    }
+
+    void MakeConstant(int32_t i32_const) {
+      DCHECK(type_ == kWasmI32 || type_ == kWasmI64);
+      loc_ = kIntConst;
+      i32_const_ = i32_const;
     }
 
     // Copy src to this, except for offset, since src and this could have been
@@ -140,6 +146,8 @@ class LiftoffAssembler : public TurboAssembler {
     CacheState() = default;
     CacheState(CacheState&&) V8_NOEXCEPT = default;
     CacheState& operator=(CacheState&&) V8_NOEXCEPT = default;
+    // Disallow copy construction.
+    CacheState(const CacheState&) = delete;
 
     base::SmallVector<VarState, 8> stack_state;
     LiftoffRegList used_registers;
@@ -277,14 +285,23 @@ class LiftoffAssembler : public TurboAssembler {
    private:
     // Make the copy assignment operator private (to be used from {Split()}).
     CacheState& operator=(const CacheState&) V8_NOEXCEPT = default;
-    // Disallow copy construction.
-    CacheState(const CacheState&) = delete;
   };
 
   explicit LiftoffAssembler(std::unique_ptr<AssemblerBuffer>);
   ~LiftoffAssembler() override;
 
-  LiftoffRegister PopToRegister(LiftoffRegList pinned = {});
+  LiftoffRegister LoadToRegister(VarState slot, LiftoffRegList pinned);
+
+  LiftoffRegister PopToRegister(LiftoffRegList pinned = {}) {
+    DCHECK(!cache_state_.stack_state.empty());
+    VarState slot = cache_state_.stack_state.back();
+    cache_state_.stack_state.pop_back();
+    if (slot.is_reg()) {
+      cache_state_.dec_used(slot.reg());
+      return slot.reg();
+    }
+    return LoadToRegister(slot, pinned);
+  }
 
   // Returns the register which holds the value of stack slot {index}. If the
   // value is not stored in a register yet, a register is allocated for it. The
@@ -340,7 +357,7 @@ class LiftoffAssembler : public TurboAssembler {
   // possible.
   LiftoffRegister GetUnusedRegister(
       RegClass rc, std::initializer_list<LiftoffRegister> try_first,
-      LiftoffRegList pinned = {}) {
+      LiftoffRegList pinned) {
     for (LiftoffRegister reg : try_first) {
       DCHECK_EQ(reg.reg_class(), rc);
       if (cache_state_.is_free(reg)) return reg;
@@ -349,20 +366,11 @@ class LiftoffAssembler : public TurboAssembler {
   }
 
   // Get an unused register for class {rc}, potentially spilling to free one.
-  LiftoffRegister GetUnusedRegister(RegClass rc, LiftoffRegList pinned = {}) {
+  LiftoffRegister GetUnusedRegister(RegClass rc, LiftoffRegList pinned) {
     if (kNeedI64RegPair && rc == kGpRegPair) {
       LiftoffRegList candidates = kGpCacheRegList;
       Register low = pinned.set(GetUnusedRegister(candidates, pinned)).gp();
       Register high = GetUnusedRegister(candidates, pinned).gp();
-      if (low.code() > high.code()) {
-        // Establish the invariant that the register of the low word always has
-        // a lower code than the register of the high word. This guarantees that
-        // if a register pair of an input is reused for the result, the low
-        // word and high word registers are not swapped, i.e. the low word
-        // register of the result is not the high word register of the input,
-        // and vice versa.
-        std::swap(low, high);
-      }
       return LiftoffRegister::ForPair(low, high);
     } else if (kNeedS128RegPair && rc == kFpRegPair) {
       // kFpRegPair specific logic here because we need adjacent registers, not
@@ -444,7 +452,13 @@ class LiftoffAssembler : public TurboAssembler {
     ParallelRegisterMoveTuple(Dst dst, Src src, ValueType type)
         : dst(dst), src(src), type(type) {}
   };
-  void ParallelRegisterMove(Vector<ParallelRegisterMoveTuple>);
+
+  void ParallelRegisterMove(Vector<const ParallelRegisterMoveTuple>);
+
+  void ParallelRegisterMove(
+      std::initializer_list<ParallelRegisterMoveTuple> moves) {
+    ParallelRegisterMove(VectorOf(moves));
+  }
 
   void MoveToReturnLocations(const FunctionSig*,
                              compiler::CallDescriptor* descriptor);
@@ -530,6 +544,7 @@ class LiftoffAssembler : public TurboAssembler {
                                   ValueType);
   inline void StoreCallerFrameSlot(LiftoffRegister, uint32_t caller_slot_idx,
                                    ValueType);
+  inline void LoadReturnStackSlot(LiftoffRegister, int offset, ValueType);
   inline void MoveStackValue(uint32_t dst_offset, uint32_t src_offset,
                              ValueType);
 
@@ -742,6 +757,15 @@ class LiftoffAssembler : public TurboAssembler {
   inline void emit_f64_set_cond(Condition condition, Register dst,
                                 DoubleRegister lhs, DoubleRegister rhs);
 
+  inline void LoadTransform(LiftoffRegister dst, Register src_addr,
+                            Register offset_reg, uint32_t offset_imm,
+                            LoadType type, LoadTransformationKind transform,
+                            uint32_t* protected_load_pc);
+  inline void emit_s8x16_shuffle(LiftoffRegister dst, LiftoffRegister lhs,
+                                 LiftoffRegister rhs,
+                                 const uint8_t shuffle[16]);
+  inline void emit_s8x16_swizzle(LiftoffRegister dst, LiftoffRegister lhs,
+                                 LiftoffRegister rhs);
   inline void emit_i8x16_splat(LiftoffRegister dst, LiftoffRegister src);
   inline void emit_i16x8_splat(LiftoffRegister dst, LiftoffRegister src);
   inline void emit_i32x4_splat(LiftoffRegister dst, LiftoffRegister src);
@@ -800,6 +824,7 @@ class LiftoffAssembler : public TurboAssembler {
                             LiftoffRegister rhs);
   inline void emit_f64x2_le(LiftoffRegister dst, LiftoffRegister lhs,
                             LiftoffRegister rhs);
+  inline void emit_s128_const(LiftoffRegister dst, const uint8_t imms[16]);
   inline void emit_s128_not(LiftoffRegister dst, LiftoffRegister src);
   inline void emit_s128_and(LiftoffRegister dst, LiftoffRegister lhs,
                             LiftoffRegister rhs);
@@ -810,10 +835,21 @@ class LiftoffAssembler : public TurboAssembler {
   inline void emit_s128_select(LiftoffRegister dst, LiftoffRegister src1,
                                LiftoffRegister src2, LiftoffRegister mask);
   inline void emit_i8x16_neg(LiftoffRegister dst, LiftoffRegister src);
+  inline void emit_v8x16_anytrue(LiftoffRegister dst, LiftoffRegister src);
+  inline void emit_v8x16_alltrue(LiftoffRegister dst, LiftoffRegister src);
+  inline void emit_i8x16_bitmask(LiftoffRegister dst, LiftoffRegister src);
   inline void emit_i8x16_shl(LiftoffRegister dst, LiftoffRegister lhs,
                              LiftoffRegister rhs);
   inline void emit_i8x16_shli(LiftoffRegister dst, LiftoffRegister lhs,
                               int32_t rhs);
+  inline void emit_i8x16_shr_s(LiftoffRegister dst, LiftoffRegister lhs,
+                               LiftoffRegister rhs);
+  inline void emit_i8x16_shri_s(LiftoffRegister dst, LiftoffRegister lhs,
+                                int32_t rhs);
+  inline void emit_i8x16_shr_u(LiftoffRegister dst, LiftoffRegister lhs,
+                               LiftoffRegister rhs);
+  inline void emit_i8x16_shri_u(LiftoffRegister dst, LiftoffRegister lhs,
+                                int32_t rhs);
   inline void emit_i8x16_add(LiftoffRegister dst, LiftoffRegister lhs,
                              LiftoffRegister rhs);
   inline void emit_i8x16_add_saturate_s(LiftoffRegister dst,
@@ -841,10 +877,21 @@ class LiftoffAssembler : public TurboAssembler {
   inline void emit_i8x16_max_u(LiftoffRegister dst, LiftoffRegister lhs,
                                LiftoffRegister rhs);
   inline void emit_i16x8_neg(LiftoffRegister dst, LiftoffRegister src);
+  inline void emit_v16x8_anytrue(LiftoffRegister dst, LiftoffRegister src);
+  inline void emit_v16x8_alltrue(LiftoffRegister dst, LiftoffRegister src);
+  inline void emit_i16x8_bitmask(LiftoffRegister dst, LiftoffRegister src);
   inline void emit_i16x8_shl(LiftoffRegister dst, LiftoffRegister lhs,
                              LiftoffRegister rhs);
   inline void emit_i16x8_shli(LiftoffRegister dst, LiftoffRegister lhs,
                               int32_t rhs);
+  inline void emit_i16x8_shr_s(LiftoffRegister dst, LiftoffRegister lhs,
+                               LiftoffRegister rhs);
+  inline void emit_i16x8_shri_s(LiftoffRegister dst, LiftoffRegister lhs,
+                                int32_t rhs);
+  inline void emit_i16x8_shr_u(LiftoffRegister dst, LiftoffRegister lhs,
+                               LiftoffRegister rhs);
+  inline void emit_i16x8_shri_u(LiftoffRegister dst, LiftoffRegister lhs,
+                                int32_t rhs);
   inline void emit_i16x8_add(LiftoffRegister dst, LiftoffRegister lhs,
                              LiftoffRegister rhs);
   inline void emit_i16x8_add_saturate_s(LiftoffRegister dst,
@@ -872,10 +919,21 @@ class LiftoffAssembler : public TurboAssembler {
   inline void emit_i16x8_max_u(LiftoffRegister dst, LiftoffRegister lhs,
                                LiftoffRegister rhs);
   inline void emit_i32x4_neg(LiftoffRegister dst, LiftoffRegister src);
+  inline void emit_v32x4_anytrue(LiftoffRegister dst, LiftoffRegister src);
+  inline void emit_v32x4_alltrue(LiftoffRegister dst, LiftoffRegister src);
+  inline void emit_i32x4_bitmask(LiftoffRegister dst, LiftoffRegister src);
   inline void emit_i32x4_shl(LiftoffRegister dst, LiftoffRegister lhs,
                              LiftoffRegister rhs);
   inline void emit_i32x4_shli(LiftoffRegister dst, LiftoffRegister lhs,
                               int32_t rhs);
+  inline void emit_i32x4_shr_s(LiftoffRegister dst, LiftoffRegister lhs,
+                               LiftoffRegister rhs);
+  inline void emit_i32x4_shri_s(LiftoffRegister dst, LiftoffRegister lhs,
+                                int32_t rhs);
+  inline void emit_i32x4_shr_u(LiftoffRegister dst, LiftoffRegister lhs,
+                               LiftoffRegister rhs);
+  inline void emit_i32x4_shri_u(LiftoffRegister dst, LiftoffRegister lhs,
+                                int32_t rhs);
   inline void emit_i32x4_add(LiftoffRegister dst, LiftoffRegister lhs,
                              LiftoffRegister rhs);
   inline void emit_i32x4_sub(LiftoffRegister dst, LiftoffRegister lhs,
@@ -895,6 +953,14 @@ class LiftoffAssembler : public TurboAssembler {
                              LiftoffRegister rhs);
   inline void emit_i64x2_shli(LiftoffRegister dst, LiftoffRegister lhs,
                               int32_t rhs);
+  inline void emit_i64x2_shr_s(LiftoffRegister dst, LiftoffRegister lhs,
+                               LiftoffRegister rhs);
+  inline void emit_i64x2_shri_s(LiftoffRegister dst, LiftoffRegister lhs,
+                                int32_t rhs);
+  inline void emit_i64x2_shr_u(LiftoffRegister dst, LiftoffRegister lhs,
+                               LiftoffRegister rhs);
+  inline void emit_i64x2_shri_u(LiftoffRegister dst, LiftoffRegister lhs,
+                                int32_t rhs);
   inline void emit_i64x2_add(LiftoffRegister dst, LiftoffRegister lhs,
                              LiftoffRegister rhs);
   inline void emit_i64x2_sub(LiftoffRegister dst, LiftoffRegister lhs,
@@ -931,6 +997,14 @@ class LiftoffAssembler : public TurboAssembler {
                              LiftoffRegister rhs);
   inline void emit_f64x2_max(LiftoffRegister dst, LiftoffRegister lhs,
                              LiftoffRegister rhs);
+  inline void emit_i32x4_sconvert_f32x4(LiftoffRegister dst,
+                                        LiftoffRegister src);
+  inline void emit_i32x4_uconvert_f32x4(LiftoffRegister dst,
+                                        LiftoffRegister src);
+  inline void emit_f32x4_sconvert_i32x4(LiftoffRegister dst,
+                                        LiftoffRegister src);
+  inline void emit_f32x4_uconvert_i32x4(LiftoffRegister dst,
+                                        LiftoffRegister src);
   inline void emit_i8x16_sconvert_i16x8(LiftoffRegister dst,
                                         LiftoffRegister lhs,
                                         LiftoffRegister rhs);
@@ -1083,7 +1157,6 @@ class LiftoffAssembler : public TurboAssembler {
   }
 
  private:
-  LiftoffRegister LoadToRegister(VarState slot, LiftoffRegList pinned);
   LiftoffRegister LoadI64HalfIntoRegister(VarState slot, RegPairHalf half);
 
   uint32_t num_locals_ = 0;
@@ -1099,8 +1172,8 @@ class LiftoffAssembler : public TurboAssembler {
   LiftoffBailoutReason bailout_reason_ = kSuccess;
   const char* bailout_detail_ = nullptr;
 
-  LiftoffRegister SpillOneRegister(LiftoffRegList candidates,
-                                   LiftoffRegList pinned);
+  V8_NOINLINE LiftoffRegister SpillOneRegister(LiftoffRegList candidates,
+                                               LiftoffRegList pinned);
   // Spill one or two fp registers to get a pair of adjacent fp registers.
   LiftoffRegister SpillAdjacentFpRegisters(LiftoffRegList pinned);
 };
@@ -1221,19 +1294,19 @@ class LiftoffStackSlots {
   }
   void Add(const LiftoffAssembler::VarState& src) { slots_.emplace_back(src); }
 
+  void Reverse() { std::reverse(slots_.begin(), slots_.end()); }
+
   inline void Construct();
 
  private:
   struct Slot {
-    // Allow move construction.
-    Slot(Slot&&) V8_NOEXCEPT = default;
     Slot(const LiftoffAssembler::VarState& src, uint32_t src_offset,
          RegPairHalf half)
         : src_(src), src_offset_(src_offset), half_(half) {}
     explicit Slot(const LiftoffAssembler::VarState& src)
         : src_(src), half_(kLowWord) {}
 
-    const LiftoffAssembler::VarState src_;
+    LiftoffAssembler::VarState src_;
     uint32_t src_offset_ = 0;
     RegPairHalf half_;
   };

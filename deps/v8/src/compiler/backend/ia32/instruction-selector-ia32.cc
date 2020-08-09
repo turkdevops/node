@@ -277,6 +277,23 @@ void VisitRRSimd(InstructionSelector* selector, Node* node,
   }
 }
 
+// TODO(v8:9198): Like VisitRROFloat, but for SIMD. SSE requires operand1 to be
+// a register as we don't have memory alignment yet. For AVX, memory operands
+// are fine, but can have performance issues if not aligned to 16/32 bytes
+// (based on load size), see SDM Vol 1, chapter 14.9
+void VisitRROSimd(InstructionSelector* selector, Node* node,
+                  ArchOpcode avx_opcode, ArchOpcode sse_opcode) {
+  IA32OperandGenerator g(selector);
+  InstructionOperand operand0 = g.UseRegister(node->InputAt(0));
+  if (selector->IsSupported(AVX)) {
+    selector->Emit(avx_opcode, g.DefineAsRegister(node), operand0,
+                   g.Use(node->InputAt(1)));
+  } else {
+    selector->Emit(sse_opcode, g.DefineSameAsFirst(node), operand0,
+                   g.UseRegister(node->InputAt(1)));
+  }
+}
+
 void VisitRRISimd(InstructionSelector* selector, Node* node,
                   ArchOpcode opcode) {
   IA32OperandGenerator g(selector);
@@ -464,6 +481,10 @@ void InstructionSelector::VisitStore(Node* node) {
   StoreRepresentation store_rep = StoreRepresentationOf(node->op());
   WriteBarrierKind write_barrier_kind = store_rep.write_barrier_kind();
   MachineRepresentation rep = store_rep.representation();
+
+  if (FLAG_enable_unconditional_write_barriers && CanBeTaggedPointer(rep)) {
+    write_barrier_kind = kFullWriteBarrier;
+  }
 
   if (write_barrier_kind != kNoWriteBarrier &&
       V8_LIKELY(!FLAG_disable_write_barriers)) {
@@ -941,7 +962,16 @@ void InstructionSelector::VisitWord32Ror(Node* node) {
   V(Float64RoundTruncate, kSSEFloat64Round | MiscField::encode(kRoundToZero)) \
   V(Float32RoundTiesEven,                                                     \
     kSSEFloat32Round | MiscField::encode(kRoundToNearest))                    \
-  V(Float64RoundTiesEven, kSSEFloat64Round | MiscField::encode(kRoundToNearest))
+  V(Float64RoundTiesEven,                                                     \
+    kSSEFloat64Round | MiscField::encode(kRoundToNearest))                    \
+  V(F32x4Ceil, kIA32F32x4Round | MiscField::encode(kRoundUp))                 \
+  V(F32x4Floor, kIA32F32x4Round | MiscField::encode(kRoundDown))              \
+  V(F32x4Trunc, kIA32F32x4Round | MiscField::encode(kRoundToZero))            \
+  V(F32x4NearestInt, kIA32F32x4Round | MiscField::encode(kRoundToNearest))    \
+  V(F64x2Ceil, kIA32F64x2Round | MiscField::encode(kRoundUp))                 \
+  V(F64x2Floor, kIA32F64x2Round | MiscField::encode(kRoundDown))              \
+  V(F64x2Trunc, kIA32F64x2Round | MiscField::encode(kRoundToZero))            \
+  V(F64x2NearestInt, kIA32F64x2Round | MiscField::encode(kRoundToNearest))
 
 #define RRO_FLOAT_OP_LIST(V)                    \
   V(Float32Add, kAVXFloat32Add, kSSEFloat32Add) \
@@ -2100,6 +2130,7 @@ void InstructionSelector::VisitWord32AtomicPairCompareExchange(Node* node) {
 #define SIMD_BINOP_UNIFIED_SSE_AVX_LIST(V) \
   V(I64x2Add)                              \
   V(I64x2Sub)                              \
+  V(I32x4DotI16x8S)                        \
   V(I16x8RoundingAverageU)                 \
   V(I8x16RoundingAverageU)
 
@@ -2131,14 +2162,14 @@ void InstructionSelector::VisitWord32AtomicPairCompareExchange(Node* node) {
   V(S128Not)
 
 #define SIMD_ANYTRUE_LIST(V) \
-  V(S1x4AnyTrue)             \
-  V(S1x8AnyTrue)             \
-  V(S1x16AnyTrue)
+  V(V32x4AnyTrue)            \
+  V(V16x8AnyTrue)            \
+  V(V8x16AnyTrue)
 
 #define SIMD_ALLTRUE_LIST(V) \
-  V(S1x4AllTrue)             \
-  V(S1x8AllTrue)             \
-  V(S1x16AllTrue)
+  V(V32x4AllTrue)            \
+  V(V16x8AllTrue)            \
+  V(V8x16AllTrue)
 
 #define SIMD_SHIFT_OPCODES_UNIFED_SSE_AVX(V) \
   V(I64x2Shl)                                \
@@ -2149,6 +2180,30 @@ void InstructionSelector::VisitWord32AtomicPairCompareExchange(Node* node) {
   V(I16x8Shl)                                \
   V(I16x8ShrS)                               \
   V(I16x8ShrU)
+
+void InstructionSelector::VisitS128Const(Node* node) {
+  IA32OperandGenerator g(this);
+  static const int kUint32Immediates = kSimd128Size / sizeof(uint32_t);
+  uint32_t val[kUint32Immediates];
+  memcpy(val, S128ImmediateParameterOf(node->op()).data(), kSimd128Size);
+  // If all bytes are zeros or ones, avoid emitting code for generic constants
+  bool all_zeros = !(val[0] || val[1] || val[2] || val[3]);
+  bool all_ones = val[0] == UINT32_MAX && val[1] == UINT32_MAX &&
+                  val[2] == UINT32_MAX && val[3] == UINT32_MAX;
+  InstructionOperand dst = g.DefineAsRegister(node);
+  if (all_zeros) {
+    Emit(kIA32S128Zero, dst);
+  } else if (all_ones) {
+    Emit(kIA32S128AllOnes, dst);
+  } else {
+    InstructionOperand inputs[kUint32Immediates];
+    for (int i = 0; i < kUint32Immediates; ++i) {
+      inputs[i] = g.UseImmediate(val[i]);
+    }
+    InstructionOperand temp(g.TempRegister());
+    Emit(kIA32S128Const, 1, &dst, kUint32Immediates, inputs, 1, &temp);
+  }
+}
 
 void InstructionSelector::VisitF64x2Min(Node* node) {
   IA32OperandGenerator g(this);
@@ -2407,23 +2462,23 @@ SIMD_ANYTRUE_LIST(VISIT_SIMD_ANYTRUE)
     IA32OperandGenerator g(this);                                             \
     InstructionOperand temps[] = {g.TempRegister(), g.TempSimd128Register()}; \
     Emit(kIA32##Opcode, g.DefineAsRegister(node),                             \
-         g.UseUnique(node->InputAt(0)), arraysize(temps), temps);             \
+         g.UseUniqueRegister(node->InputAt(0)), arraysize(temps), temps);     \
   }
 SIMD_ALLTRUE_LIST(VISIT_SIMD_ALLTRUE)
 #undef VISIT_SIMD_ALLTRUE
 #undef SIMD_ALLTRUE_LIST
 
-#define VISIT_SIMD_BINOP(Opcode)                           \
-  void InstructionSelector::Visit##Opcode(Node* node) {    \
-    VisitRROFloat(this, node, kAVX##Opcode, kSSE##Opcode); \
+#define VISIT_SIMD_BINOP(Opcode)                          \
+  void InstructionSelector::Visit##Opcode(Node* node) {   \
+    VisitRROSimd(this, node, kAVX##Opcode, kSSE##Opcode); \
   }
 SIMD_BINOP_LIST(VISIT_SIMD_BINOP)
 #undef VISIT_SIMD_BINOP
 #undef SIMD_BINOP_LIST
 
-#define VISIT_SIMD_BINOP_UNIFIED_SSE_AVX(Opcode)             \
-  void InstructionSelector::Visit##Opcode(Node* node) {      \
-    VisitRROFloat(this, node, kIA32##Opcode, kIA32##Opcode); \
+#define VISIT_SIMD_BINOP_UNIFIED_SSE_AVX(Opcode)            \
+  void InstructionSelector::Visit##Opcode(Node* node) {     \
+    VisitRROSimd(this, node, kIA32##Opcode, kIA32##Opcode); \
   }
 SIMD_BINOP_UNIFIED_SSE_AVX_LIST(VISIT_SIMD_BINOP_UNIFIED_SSE_AVX)
 #undef VISIT_SIMD_BINOP_UNIFIED_SSE_AVX

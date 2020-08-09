@@ -94,6 +94,7 @@ class BasicBlock;
   V(WordSar)                              \
   V(WordSarShiftOutZeros)                 \
   V(WordShl)                              \
+  V(WordShr)                              \
   V(WordXor)
 
 #define CHECKED_ASSEMBLER_MACH_BINOP_LIST(V) \
@@ -129,47 +130,6 @@ class BasicBlock;
   V(Zero, Number)
 
 class GraphAssembler;
-
-// Wrapper classes for special node/edge types (effect, control, frame states)
-// that otherwise don't fit into the type system.
-
-class NodeWrapper {
- public:
-  explicit constexpr NodeWrapper(Node* node) : node_(node) {}
-  operator Node*() const { return node_; }
-  Node* operator->() const { return node_; }
-
- private:
-  Node* node_;
-};
-
-class Effect : public NodeWrapper {
- public:
-  explicit constexpr Effect(Node* node) : NodeWrapper(node) {
-    // TODO(jgruber): Remove the End special case.
-    SLOW_DCHECK(node == nullptr || node->op()->opcode() == IrOpcode::kEnd ||
-                node->op()->EffectOutputCount() > 0);
-  }
-};
-
-class Control : public NodeWrapper {
- public:
-  explicit constexpr Control(Node* node) : NodeWrapper(node) {
-    // TODO(jgruber): Remove the End special case.
-    SLOW_DCHECK(node == nullptr || node->opcode() == IrOpcode::kEnd ||
-                node->op()->ControlOutputCount() > 0);
-  }
-};
-
-class FrameState : public NodeWrapper {
- public:
-  explicit constexpr FrameState(Node* node) : NodeWrapper(node) {
-    // TODO(jgruber): Disallow kStart (needed for PromiseConstructorBasic unit
-    // test, among others).
-    SLOW_DCHECK(node->opcode() == IrOpcode::kFrameState ||
-                node->opcode() == IrOpcode::kStart);
-  }
-};
 
 enum class GraphAssemblerLabelType { kDeferred, kNonDeferred, kLoop };
 
@@ -313,6 +273,8 @@ class V8_EXPORT_PRIVATE GraphAssembler {
   Node* TypeGuard(Type type, Node* value);
   Node* Checkpoint(FrameState frame_state);
 
+  TNode<RawPtrT> StackSlot(int size, int alignment);
+
   Node* Store(StoreRepresentation rep, Node* object, Node* offset, Node* value);
   Node* Store(StoreRepresentation rep, Node* object, int offset, Node* value);
   Node* Load(MachineType type, Node* object, Node* offset);
@@ -335,10 +297,14 @@ class V8_EXPORT_PRIVATE GraphAssembler {
       DeoptimizeReason reason, FeedbackSource const& feedback, Node* condition,
       Node* frame_state,
       IsSafetyCheck is_safety_check = IsSafetyCheck::kSafetyCheck);
+  TNode<Object> Call(const CallDescriptor* call_descriptor, int inputs_size,
+                     Node** inputs);
+  TNode<Object> Call(const Operator* op, int inputs_size, Node** inputs);
   template <typename... Args>
-  Node* Call(const CallDescriptor* call_descriptor, Args... args);
+  TNode<Object> Call(const CallDescriptor* call_descriptor, Node* first_arg,
+                     Args... args);
   template <typename... Args>
-  Node* Call(const Operator* op, Args... args);
+  TNode<Object> Call(const Operator* op, Node* first_arg, Args... args);
 
   // Basic control operations.
   template <size_t VarCount>
@@ -758,19 +724,19 @@ void GraphAssembler::GotoIfNot(Node* condition,
 }
 
 template <typename... Args>
-Node* GraphAssembler::Call(const CallDescriptor* call_descriptor,
-                           Args... args) {
+TNode<Object> GraphAssembler::Call(const CallDescriptor* call_descriptor,
+                                   Node* first_arg, Args... args) {
   const Operator* op = common()->Call(call_descriptor);
-  return Call(op, args...);
+  return Call(op, first_arg, args...);
 }
 
 template <typename... Args>
-Node* GraphAssembler::Call(const Operator* op, Args... args) {
-  DCHECK_EQ(IrOpcode::kCall, op->opcode());
-  Node* args_array[] = {args..., effect(), control()};
-  int size = static_cast<int>(sizeof...(args)) + op->EffectInputCount() +
+TNode<Object> GraphAssembler::Call(const Operator* op, Node* first_arg,
+                                   Args... args) {
+  Node* args_array[] = {first_arg, args..., effect(), control()};
+  int size = static_cast<int>(1 + sizeof...(args)) + op->EffectInputCount() +
              op->ControlInputCount();
-  return AddNode(graph()->NewNode(op, size, args_array));
+  return Call(op, size, args_array);
 }
 
 class V8_EXPORT_PRIVATE JSGraphAssembler : public GraphAssembler {

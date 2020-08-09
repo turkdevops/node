@@ -8,6 +8,7 @@
 #include "src/base/macros.h"
 #include "src/builtins/accessors.h"
 #include "src/common/globals.h"
+#include "src/execution/local-isolate-wrapper.h"
 #include "src/handles/handles.h"
 #include "src/init/heap-symbols.h"
 #include "src/objects/objects-definitions.h"
@@ -107,7 +108,6 @@ class Symbol;
   V(Map, next_call_side_effect_free_call_handler_info_map,                     \
     NextCallSideEffectFreeCallHandlerInfoMap)                                  \
   V(Map, simple_number_dictionary_map, SimpleNumberDictionaryMap)              \
-  V(Map, sloppy_arguments_elements_map, SloppyArgumentsElementsMap)            \
   V(Map, small_ordered_hash_map_map, SmallOrderedHashMapMap)                   \
   V(Map, small_ordered_hash_set_map, SmallOrderedHashSetMap)                   \
   V(Map, small_ordered_name_dictionary_map, SmallOrderedNameDictionaryMap)     \
@@ -118,6 +118,7 @@ class Symbol;
     UncompiledDataWithoutPreparseDataMap)                                      \
   V(Map, uncompiled_data_with_preparse_data_map,                               \
     UncompiledDataWithPreparseDataMap)                                         \
+  V(Map, wasm_type_info_map, WasmTypeInfoMap)                                  \
   V(Map, weak_fixed_array_map, WeakFixedArrayMap)                              \
   V(Map, weak_array_list_map, WeakArrayListMap)                                \
   V(Map, ephemeron_hash_table_map, EphemeronHashTableMap)                      \
@@ -155,6 +156,7 @@ class Symbol;
   V(Map, optimized_out_map, OptimizedOutMap)                                   \
   V(Map, stale_register_map, StaleRegisterMap)                                 \
   V(Map, self_reference_marker_map, SelfReferenceMarkerMap)                    \
+  V(Map, basic_block_counters_marker_map, BasicBlockCountersMarkerMap)         \
   /* Canonical empty values */                                                 \
   V(EnumCache, empty_enum_cache, EmptyEnumCache)                               \
   V(PropertyArray, empty_property_array, EmptyPropertyArray)                   \
@@ -165,7 +167,6 @@ class Symbol;
     EmptyArrayBoilerplateDescription)                                          \
   V(ClosureFeedbackCellArray, empty_closure_feedback_cell_array,               \
     EmptyClosureFeedbackCellArray)                                             \
-  V(FixedArray, empty_sloppy_arguments_elements, EmptySloppyArgumentsElements) \
   V(NumberDictionary, empty_slow_element_dictionary,                           \
     EmptySlowElementDictionary)                                                \
   V(FixedArray, empty_ordered_hash_map, EmptyOrderedHashMap)                   \
@@ -184,6 +185,8 @@ class Symbol;
   V(HeapNumber, minus_infinity_value, MinusInfinityValue)                      \
   /* Marker for self-references during code-generation */                      \
   V(HeapObject, self_reference_marker, SelfReferenceMarker)                    \
+  /* Marker for basic-block usage counters array during code-generation */     \
+  V(Oddball, basic_block_counters_marker, BasicBlockCountersMarker)            \
   /* Canonical off-heap trampoline data */                                     \
   V(ByteArray, off_heap_trampoline_relocation_info,                            \
     OffHeapTrampolineRelocationInfo)                                           \
@@ -205,6 +208,10 @@ class Symbol;
   /* Maps */                                                                   \
   V(Map, external_map, ExternalMap)                                            \
   V(Map, message_object_map, JSMessageObjectMap)                               \
+  V(Map, wasm_rttcanon_eqref_map, WasmRttEqrefMap)                             \
+  V(Map, wasm_rttcanon_externref_map, WasmRttExternrefMap)                     \
+  V(Map, wasm_rttcanon_funcref_map, WasmRttFuncrefMap)                         \
+  V(Map, wasm_rttcanon_i31ref_map, WasmRttI31refMap)                           \
   /* Canonical empty values */                                                 \
   V(Script, empty_script, EmptyScript)                                         \
   V(FeedbackCell, many_closures_cell, ManyClosuresCell)                        \
@@ -302,6 +309,7 @@ class Symbol;
     InterpreterEntryTrampolineForProfiling)                                \
   V(Object, pending_optimize_for_test_bytecode,                            \
     PendingOptimizeForTestBytecode)                                        \
+  V(ArrayList, basic_block_profiling_data, BasicBlockProfilingData)        \
   V(WeakArrayList, shared_wasm_memories, SharedWasmMemories)
 
 // Entries in this list are limited to Smis and are not visited during GC.
@@ -353,7 +361,7 @@ class Symbol;
   PUBLIC_SYMBOL_ROOT_LIST(V)       \
   WELL_KNOWN_SYMBOL_ROOT_LIST(V)   \
   STRUCT_MAPS_LIST(V)              \
-  TORQUE_INTERNAL_MAP_ROOT_LIST(V) \
+  TORQUE_DEFINED_MAP_ROOT_LIST(V)  \
   ALLOCATION_SITE_MAPS_LIST(V)     \
   DATA_HANDLER_MAPS_LIST(V)
 
@@ -461,42 +469,42 @@ class RootsTable {
   }
 
   // Used for iterating over all of the read-only and mutable strong roots.
-  FullObjectSlot strong_or_read_only_roots_begin() {
+  FullObjectSlot strong_or_read_only_roots_begin() const {
     STATIC_ASSERT(static_cast<size_t>(RootIndex::kLastReadOnlyRoot) ==
                   static_cast<size_t>(RootIndex::kFirstStrongRoot) - 1);
     return FullObjectSlot(
         &roots_[static_cast<size_t>(RootIndex::kFirstStrongOrReadOnlyRoot)]);
   }
-  FullObjectSlot strong_or_read_only_roots_end() {
+  FullObjectSlot strong_or_read_only_roots_end() const {
     return FullObjectSlot(
         &roots_[static_cast<size_t>(RootIndex::kLastStrongOrReadOnlyRoot) + 1]);
   }
 
   // The read-only, strong and Smi roots as defined by these accessors are all
   // disjoint.
-  FullObjectSlot read_only_roots_begin() {
+  FullObjectSlot read_only_roots_begin() const {
     return FullObjectSlot(
         &roots_[static_cast<size_t>(RootIndex::kFirstReadOnlyRoot)]);
   }
-  FullObjectSlot read_only_roots_end() {
+  FullObjectSlot read_only_roots_end() const {
     return FullObjectSlot(
         &roots_[static_cast<size_t>(RootIndex::kLastReadOnlyRoot) + 1]);
   }
 
-  FullObjectSlot strong_roots_begin() {
+  FullObjectSlot strong_roots_begin() const {
     return FullObjectSlot(
         &roots_[static_cast<size_t>(RootIndex::kFirstStrongRoot)]);
   }
-  FullObjectSlot strong_roots_end() {
+  FullObjectSlot strong_roots_end() const {
     return FullObjectSlot(
         &roots_[static_cast<size_t>(RootIndex::kLastStrongRoot) + 1]);
   }
 
-  FullObjectSlot smi_roots_begin() {
+  FullObjectSlot smi_roots_begin() const {
     return FullObjectSlot(
         &roots_[static_cast<size_t>(RootIndex::kFirstSmiRoot)]);
   }
-  FullObjectSlot smi_roots_end() {
+  FullObjectSlot smi_roots_end() const {
     return FullObjectSlot(
         &roots_[static_cast<size_t>(RootIndex::kLastSmiRoot) + 1]);
   }
@@ -527,6 +535,8 @@ class ReadOnlyRoots {
   V8_INLINE explicit ReadOnlyRoots(OffThreadHeap* heap);
   V8_INLINE explicit ReadOnlyRoots(Isolate* isolate);
   V8_INLINE explicit ReadOnlyRoots(OffThreadIsolate* isolate);
+  V8_INLINE explicit ReadOnlyRoots(LocalIsolateWrapper wrapper);
+  V8_INLINE explicit ReadOnlyRoots(LocalHeapWrapper wrapper);
 
 #define ROOT_ACCESSOR(Type, name, CamelName)     \
   V8_INLINE class Type name() const;             \
@@ -553,13 +563,15 @@ class ReadOnlyRoots {
 #undef ROOT_TYPE_CHECK
 #endif
 
-  V8_INLINE explicit ReadOnlyRoots(Address* ro_roots);
+  V8_INLINE explicit ReadOnlyRoots(Address* ro_roots)
+      : read_only_roots_(ro_roots) {}
 
   V8_INLINE Address* GetLocation(RootIndex root_index) const;
 
   Address* read_only_roots_;
 
   friend class ReadOnlyHeap;
+  friend class DeserializerAllocator;
 };
 
 }  // namespace internal

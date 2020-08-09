@@ -328,7 +328,7 @@ class ParserBase {
 
     BlockState(Zone* zone, Scope** scope_stack)
         : BlockState(scope_stack,
-                     new (zone) Scope(zone, *scope_stack, BLOCK_SCOPE)) {}
+                     zone->New<Scope>(zone, *scope_stack, BLOCK_SCOPE)) {}
 
     ~BlockState() { *scope_stack_ = outer_scope_; }
 
@@ -693,11 +693,14 @@ class ParserBase {
     // Add {label} to both {labels} and {own_labels}.
     if (*labels == nullptr) {
       DCHECK_NULL(*own_labels);
-      *labels = new (zone()) ZonePtrList<const AstRawString>(1, zone());
-      *own_labels = new (zone()) ZonePtrList<const AstRawString>(1, zone());
+      *labels =
+          zone()->template New<ZonePtrList<const AstRawString>>(1, zone());
+      *own_labels =
+          zone()->template New<ZonePtrList<const AstRawString>>(1, zone());
     } else {
       if (*own_labels == nullptr) {
-        *own_labels = new (zone()) ZonePtrList<const AstRawString>(1, zone());
+        *own_labels =
+            zone()->template New<ZonePtrList<const AstRawString>>(1, zone());
       }
     }
     (*labels)->Add(label, zone());
@@ -758,24 +761,24 @@ class ParserBase {
   }
 
   DeclarationScope* NewScriptScope(REPLMode repl_mode) const {
-    return new (zone())
-        DeclarationScope(zone(), ast_value_factory(), repl_mode);
+    return zone()->template New<DeclarationScope>(zone(), ast_value_factory(),
+                                                  repl_mode);
   }
 
   DeclarationScope* NewVarblockScope() const {
-    return new (zone()) DeclarationScope(zone(), scope(), BLOCK_SCOPE);
+    return zone()->template New<DeclarationScope>(zone(), scope(), BLOCK_SCOPE);
   }
 
   ModuleScope* NewModuleScope(DeclarationScope* parent) const {
-    return new (zone()) ModuleScope(parent, ast_value_factory());
+    return zone()->template New<ModuleScope>(parent, ast_value_factory());
   }
 
   DeclarationScope* NewEvalScope(Scope* parent) const {
-    return new (zone()) DeclarationScope(zone(), parent, EVAL_SCOPE);
+    return zone()->template New<DeclarationScope>(zone(), parent, EVAL_SCOPE);
   }
 
   ClassScope* NewClassScope(Scope* parent, bool is_anonymous) const {
-    return new (zone()) ClassScope(zone(), parent, is_anonymous);
+    return zone()->template New<ClassScope>(zone(), parent, is_anonymous);
   }
 
   Scope* NewScope(ScopeType scope_type) const {
@@ -786,13 +789,13 @@ class ParserBase {
   // should automatically use scope() as parent, and be fine with
   // NewScope(ScopeType) above.
   Scope* NewScopeWithParent(Scope* parent, ScopeType scope_type) const {
-    // Must always use the specific constructors for the blacklisted scope
+    // Must always use the specific constructors for the blocklisted scope
     // types.
     DCHECK_NE(FUNCTION_SCOPE, scope_type);
     DCHECK_NE(SCRIPT_SCOPE, scope_type);
     DCHECK_NE(MODULE_SCOPE, scope_type);
     DCHECK_NOT_NULL(parent);
-    return new (zone()) Scope(zone(), parent, scope_type);
+    return zone()->template New<Scope>(zone(), parent, scope_type);
   }
 
   // Creates a function scope that always allocates in zone(). The function
@@ -802,8 +805,8 @@ class ParserBase {
                                      Zone* parse_zone = nullptr) const {
     DCHECK(ast_value_factory());
     if (parse_zone == nullptr) parse_zone = zone();
-    DeclarationScope* result = new (zone())
-        DeclarationScope(parse_zone, scope(), FUNCTION_SCOPE, kind);
+    DeclarationScope* result = zone()->template New<DeclarationScope>(
+        parse_zone, scope(), FUNCTION_SCOPE, kind);
 
     // Record presence of an inner function scope
     function_state_->RecordFunctionOrEvalCall();
@@ -2755,8 +2758,7 @@ ParserBase<Impl>::ParseAssignmentExpressionCoverGrammar() {
   Token::Value op = peek();
 
   if (!Token::IsArrowOrAssignmentOp(op)) return expression;
-  if ((op == Token::ASSIGN_NULLISH || op == Token::ASSIGN_OR ||
-       op == Token::ASSIGN_AND) &&
+  if (Token::IsLogicalAssignmentOp(op) &&
       !flags().allow_harmony_logical_assignment()) {
     return expression;
   }
@@ -2830,13 +2832,8 @@ ParserBase<Impl>::ParseAssignmentExpressionCoverGrammar() {
 
   ExpressionT right = ParseAssignmentExpression();
 
-  if (op == Token::ASSIGN) {
-    // We try to estimate the set of properties set by constructors. We define a
-    // new property whenever there is an assignment to a property of 'this'. We
-    // should probably only add properties if we haven't seen them before.
-    // Otherwise we'll probably overestimate the number of properties.
-    if (impl()->IsThisProperty(expression)) function_state_->AddProperty();
-
+  // Anonymous function name inference applies to =, ||=, &&=, and ??=.
+  if (op == Token::ASSIGN || Token::IsLogicalAssignmentOp(op)) {
     impl()->CheckAssigningFunctionLiteralToProperty(expression, right);
 
     // Check if the right hand side is a call to avoid inferring a
@@ -2850,10 +2847,20 @@ ParserBase<Impl>::ParseAssignmentExpressionCoverGrammar() {
 
     impl()->SetFunctionNameFromIdentifierRef(right, expression);
   } else {
+    fni_.RemoveLastFunction();
+  }
+
+  if (op == Token::ASSIGN) {
+    // We try to estimate the set of properties set by constructors. We define a
+    // new property whenever there is an assignment to a property of 'this'. We
+    // should probably only add properties if we haven't seen them before.
+    // Otherwise we'll probably overestimate the number of properties.
+    if (impl()->IsThisProperty(expression)) function_state_->AddProperty();
+  } else {
+    // Only initializers (i.e. no compound assignments) are allowed in patterns.
     expression_scope()->RecordPatternError(
         Scanner::Location(lhs_beg_pos, end_position()),
         MessageTemplate::kInvalidDestructuringTarget);
-    fni_.RemoveLastFunction();
   }
 
   return factory()->NewAssignment(op, expression, right, op_position);
@@ -5277,7 +5284,8 @@ typename ParserBase<Impl>::StatementT ParserBase<Impl>::ParseIfStatement(
     auto labels_copy =
         labels == nullptr
             ? labels
-            : new (zone()) ZonePtrList<const AstRawString>(*labels, zone());
+            : zone()->template New<ZonePtrList<const AstRawString>>(*labels,
+                                                                    zone());
     then_statement = ParseScopedStatement(labels_copy);
   }
 

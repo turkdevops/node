@@ -260,7 +260,7 @@ class SharedFunctionInfo : public HeapObject {
   // Returns an IsCompiledScope which reports whether the function is compiled,
   // and if compiled, will avoid the function becoming uncompiled while it is
   // held.
-  inline IsCompiledScope is_compiled_scope() const;
+  inline IsCompiledScope is_compiled_scope(Isolate* isolate) const;
 
   // [length]: The function length - usually the number of declared parameters.
   // Use up to 2^16-2 parameters (16 bits of values, where one is reserved for
@@ -409,6 +409,15 @@ class SharedFunctionInfo : public HeapObject {
   // private instance methdos.
   DECL_BOOLEAN_ACCESSORS(class_scope_has_private_brand)
   DECL_BOOLEAN_ACCESSORS(has_static_private_methods_or_accessors)
+
+  // True if a Code object associated with this SFI has been inserted into the
+  // compilation cache. Note that the cache entry may be removed by aging,
+  // hence the 'may'.
+  DECL_BOOLEAN_ACCESSORS(may_have_cached_code)
+
+  // Returns the cached Code object for this SFI if it exists, an empty handle
+  // otherwise.
+  MaybeHandle<Code> TryGetCachedCode(Isolate* isolate);
 
   // Is this function a top-level function (scripts, evals).
   DECL_BOOLEAN_ACCESSORS(is_toplevel)

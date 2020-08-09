@@ -819,6 +819,11 @@ void InstructionSelector::VisitStore(Node* node) {
   WriteBarrierKind write_barrier_kind = store_rep.write_barrier_kind();
   MachineRepresentation rep = store_rep.representation();
 
+  if (FLAG_enable_unconditional_write_barriers &&
+      CanBeTaggedOrCompressedPointer(rep)) {
+    write_barrier_kind = kFullWriteBarrier;
+  }
+
   VisitGeneralStore(this, node, rep, write_barrier_kind);
 }
 
@@ -2635,11 +2640,19 @@ void InstructionSelector::VisitWord64AtomicStore(Node* node) {
   V(F64x2Abs)               \
   V(F64x2Neg)               \
   V(F64x2Sqrt)              \
+  V(F64x2Ceil)              \
+  V(F64x2Floor)             \
+  V(F64x2Trunc)             \
+  V(F64x2NearestInt)        \
   V(F32x4Abs)               \
   V(F32x4Neg)               \
   V(F32x4RecipApprox)       \
   V(F32x4RecipSqrtApprox)   \
   V(F32x4Sqrt)              \
+  V(F32x4Ceil)              \
+  V(F32x4Floor)             \
+  V(F32x4Trunc)             \
+  V(F32x4NearestInt)        \
   V(I64x2Neg)               \
   V(I16x8Abs)               \
   V(I32x4Neg)               \
@@ -2672,14 +2685,14 @@ void InstructionSelector::VisitWord64AtomicStore(Node* node) {
   V(I8x16ShrU)
 
 #define SIMD_BOOL_LIST(V) \
-  V(S1x2AnyTrue)          \
-  V(S1x4AnyTrue)          \
-  V(S1x8AnyTrue)          \
-  V(S1x16AnyTrue)         \
-  V(S1x2AllTrue)          \
-  V(S1x4AllTrue)          \
-  V(S1x8AllTrue)          \
-  V(S1x16AllTrue)
+  V(V64x2AnyTrue)         \
+  V(V32x4AnyTrue)         \
+  V(V16x8AnyTrue)         \
+  V(V8x16AnyTrue)         \
+  V(V64x2AllTrue)         \
+  V(V32x4AllTrue)         \
+  V(V16x8AllTrue)         \
+  V(V8x16AllTrue)
 
 #define SIMD_CONVERSION_LIST(V) \
   V(I32x4SConvertF32x4)         \
@@ -2794,10 +2807,34 @@ SIMD_VISIT_QFMOP(F64x2Qfms)
 SIMD_VISIT_QFMOP(F32x4Qfma)
 SIMD_VISIT_QFMOP(F32x4Qfms)
 #undef SIMD_VISIT_QFMOP
+
+#define SIMD_VISIT_BITMASK(Opcode)                      \
+  void InstructionSelector::Visit##Opcode(Node* node) { \
+    S390OperandGenerator g(this);                       \
+    Emit(kS390_##Opcode, g.DefineAsRegister(node),      \
+         g.UseUniqueRegister(node->InputAt(0)));        \
+  }
+SIMD_VISIT_BITMASK(I8x16BitMask)
+SIMD_VISIT_BITMASK(I16x8BitMask)
+SIMD_VISIT_BITMASK(I32x4BitMask)
+#undef SIMD_VISIT_BITMASK
+
+#define SIMD_VISIT_PMIN_MAX(Type)                                           \
+  void InstructionSelector::Visit##Type(Node* node) {                       \
+    S390OperandGenerator g(this);                                           \
+    Emit(kS390_##Type, g.DefineAsRegister(node),                            \
+         g.UseRegister(node->InputAt(0)), g.UseRegister(node->InputAt(1))); \
+  }
+SIMD_VISIT_PMIN_MAX(F64x2Pmin)
+SIMD_VISIT_PMIN_MAX(F32x4Pmin)
+SIMD_VISIT_PMIN_MAX(F64x2Pmax)
+SIMD_VISIT_PMIN_MAX(F32x4Pmax)
+#undef SIMD_VISIT_PMIN_MAX
 #undef SIMD_TYPES
 
 void InstructionSelector::VisitS8x16Shuffle(Node* node) {
   uint8_t shuffle[kSimd128Size];
+  uint8_t* shuffle_p = &shuffle[0];
   bool is_swizzle;
   CanonicalizeShuffle(node, shuffle, &is_swizzle);
   S390OperandGenerator g(this);
@@ -2815,22 +2852,14 @@ void InstructionSelector::VisitS8x16Shuffle(Node* node) {
                                ? max_index - current_index
                                : total_lane_count - current_index + max_index);
   }
-  Emit(kS390_S8x16Shuffle, g.DefineAsRegister(node), g.UseRegister(input0),
-       g.UseRegister(input1),
-       // Pack4Lanes reverses the bytes, therefore we will need to pass it in
-       // reverse
-       g.UseImmediate(Pack4Lanes(shuffle_remapped + 12)),
-       g.UseImmediate(Pack4Lanes(shuffle_remapped + 8)),
-       g.UseImmediate(Pack4Lanes(shuffle_remapped + 4)),
-       g.UseImmediate(Pack4Lanes(shuffle_remapped)));
-#else
+  shuffle_p = &shuffle_remapped[0];
+#endif
   Emit(kS390_S8x16Shuffle, g.DefineAsRegister(node),
        g.UseUniqueRegister(input0), g.UseUniqueRegister(input1),
-       g.UseImmediate(Pack4Lanes(shuffle)),
-       g.UseImmediate(Pack4Lanes(shuffle + 4)),
-       g.UseImmediate(Pack4Lanes(shuffle + 8)),
-       g.UseImmediate(Pack4Lanes(shuffle + 12)));
-#endif
+       g.UseImmediate(Pack4Lanes(shuffle_p)),
+       g.UseImmediate(Pack4Lanes(shuffle_p + 4)),
+       g.UseImmediate(Pack4Lanes(shuffle_p + 8)),
+       g.UseImmediate(Pack4Lanes(shuffle_p + 12)));
 }
 
 void InstructionSelector::VisitS8x16Swizzle(Node* node) {
@@ -2838,6 +2867,30 @@ void InstructionSelector::VisitS8x16Swizzle(Node* node) {
   Emit(kS390_S8x16Swizzle, g.DefineAsRegister(node),
        g.UseUniqueRegister(node->InputAt(0)),
        g.UseUniqueRegister(node->InputAt(1)));
+}
+
+void InstructionSelector::VisitS128Const(Node* node) {
+  S390OperandGenerator g(this);
+  uint32_t val[kSimd128Size / sizeof(uint32_t)];
+  memcpy(val, S128ImmediateParameterOf(node->op()).data(), kSimd128Size);
+  // If all bytes are zeros, avoid emitting code for generic constants.
+  bool all_zeros = !(val[0] || val[1] || val[2] || val[3]);
+  bool all_ones = val[0] == UINT32_MAX && val[1] == UINT32_MAX &&
+                  val[2] == UINT32_MAX && val[3] == UINT32_MAX;
+  InstructionOperand dst = g.DefineAsRegister(node);
+  if (all_zeros) {
+    Emit(kS390_S128Zero, dst);
+  } else if (all_ones) {
+    Emit(kS390_S128AllOnes, dst);
+  } else {
+    // We have to use Pack4Lanes to reverse the bytes (lanes) on BE,
+    // Which in this case is ineffective on LE.
+    Emit(kS390_S128Const, g.DefineAsRegister(node),
+         g.UseImmediate(Pack4Lanes(reinterpret_cast<uint8_t*>(val))),
+         g.UseImmediate(Pack4Lanes(reinterpret_cast<uint8_t*>(val) + 4)),
+         g.UseImmediate(Pack4Lanes(reinterpret_cast<uint8_t*>(val) + 8)),
+         g.UseImmediate(Pack4Lanes(reinterpret_cast<uint8_t*>(val) + 12)));
+  }
 }
 
 void InstructionSelector::VisitS128Zero(Node* node) {

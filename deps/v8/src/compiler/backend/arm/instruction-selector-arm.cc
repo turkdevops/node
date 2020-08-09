@@ -608,6 +608,11 @@ void InstructionSelector::VisitStore(Node* node) {
   WriteBarrierKind write_barrier_kind = store_rep.write_barrier_kind();
   MachineRepresentation rep = store_rep.representation();
 
+  if (FLAG_enable_unconditional_write_barriers &&
+      CanBeTaggedOrCompressedPointer(rep)) {
+    write_barrier_kind = kFullWriteBarrier;
+  }
+
   if (write_barrier_kind != kNoWriteBarrier &&
       V8_LIKELY(!FLAG_disable_write_barriers)) {
     DCHECK(CanBeTaggedPointer(rep));
@@ -1486,16 +1491,24 @@ void InstructionSelector::VisitUint32Mod(Node* node) {
   V(Float32Sqrt, kArmVsqrtF32)                       \
   V(Float64Sqrt, kArmVsqrtF64)
 
-#define RR_OP_LIST_V8(V)                 \
-  V(Float32RoundDown, kArmVrintmF32)     \
-  V(Float64RoundDown, kArmVrintmF64)     \
-  V(Float32RoundUp, kArmVrintpF32)       \
-  V(Float64RoundUp, kArmVrintpF64)       \
-  V(Float32RoundTruncate, kArmVrintzF32) \
-  V(Float64RoundTruncate, kArmVrintzF64) \
-  V(Float64RoundTiesAway, kArmVrintaF64) \
-  V(Float32RoundTiesEven, kArmVrintnF32) \
-  V(Float64RoundTiesEven, kArmVrintnF64)
+#define RR_OP_LIST_V8(V)                  \
+  V(Float32RoundDown, kArmVrintmF32)      \
+  V(Float64RoundDown, kArmVrintmF64)      \
+  V(Float32RoundUp, kArmVrintpF32)        \
+  V(Float64RoundUp, kArmVrintpF64)        \
+  V(Float32RoundTruncate, kArmVrintzF32)  \
+  V(Float64RoundTruncate, kArmVrintzF64)  \
+  V(Float64RoundTiesAway, kArmVrintaF64)  \
+  V(Float32RoundTiesEven, kArmVrintnF32)  \
+  V(Float64RoundTiesEven, kArmVrintnF64)  \
+  V(F64x2Ceil, kArmF64x2Ceil)             \
+  V(F64x2Floor, kArmF64x2Floor)           \
+  V(F64x2Trunc, kArmF64x2Trunc)           \
+  V(F64x2NearestInt, kArmF64x2NearestInt) \
+  V(F32x4Ceil, kArmVrintpF32)             \
+  V(F32x4Floor, kArmVrintmF32)            \
+  V(F32x4Trunc, kArmVrintzF32)            \
+  V(F32x4NearestInt, kArmVrintnF32)
 
 #define RRR_OP_LIST(V)          \
   V(Int32MulHigh, kArmSmmul)    \
@@ -2525,12 +2538,12 @@ void InstructionSelector::VisitWord32AtomicPairCompareExchange(Node* node) {
   V(I8x16Neg, kArmI8x16Neg)                             \
   V(I8x16Abs, kArmI8x16Abs)                             \
   V(S128Not, kArmS128Not)                               \
-  V(S1x4AnyTrue, kArmS1x4AnyTrue)                       \
-  V(S1x4AllTrue, kArmS1x4AllTrue)                       \
-  V(S1x8AnyTrue, kArmS1x8AnyTrue)                       \
-  V(S1x8AllTrue, kArmS1x8AllTrue)                       \
-  V(S1x16AnyTrue, kArmS1x16AnyTrue)                     \
-  V(S1x16AllTrue, kArmS1x16AllTrue)
+  V(V32x4AnyTrue, kArmV32x4AnyTrue)                     \
+  V(V32x4AllTrue, kArmV32x4AllTrue)                     \
+  V(V16x8AnyTrue, kArmV16x8AnyTrue)                     \
+  V(V16x8AllTrue, kArmV16x8AllTrue)                     \
+  V(V8x16AnyTrue, kArmV8x16AnyTrue)                     \
+  V(V8x16AllTrue, kArmV8x16AllTrue)
 
 #define SIMD_SHIFT_OP_LIST(V) \
   V(I64x2Shl, 64)             \
@@ -2628,6 +2641,33 @@ void InstructionSelector::VisitWord32AtomicPairCompareExchange(Node* node) {
   V(S128Or, kArmS128Or)                               \
   V(S128Xor, kArmS128Xor)                             \
   V(S128AndNot, kArmS128AndNot)
+
+void InstructionSelector::VisitI32x4DotI16x8S(Node* node) {
+  ArmOperandGenerator g(this);
+  InstructionOperand temps[] = {g.TempSimd128Register()};
+  Emit(kArmI32x4DotI16x8S, g.DefineAsRegister(node),
+       g.UseUniqueRegister(node->InputAt(0)),
+       g.UseUniqueRegister(node->InputAt(1)), arraysize(temps), temps);
+}
+
+void InstructionSelector::VisitS128Const(Node* node) {
+  ArmOperandGenerator g(this);
+  uint32_t val[kSimd128Size / sizeof(uint32_t)];
+  memcpy(val, S128ImmediateParameterOf(node->op()).data(), kSimd128Size);
+  // If all bytes are zeros, avoid emitting code for generic constants.
+  bool all_zeros = !(val[0] || val[1] || val[2] || val[3]);
+  bool all_ones = val[0] == UINT32_MAX && val[1] == UINT32_MAX &&
+                  val[2] == UINT32_MAX && val[3] == UINT32_MAX;
+  InstructionOperand dst = g.DefineAsRegister(node);
+  if (all_zeros) {
+    Emit(kArmS128Zero, dst);
+  } else if (all_ones) {
+    Emit(kArmS128AllOnes, dst);
+  } else {
+    Emit(kArmS128Const, dst, g.UseImmediate(val[0]), g.UseImmediate(val[1]),
+         g.UseImmediate(val[2]), g.UseImmediate(val[3]));
+  }
+}
 
 void InstructionSelector::VisitS128Zero(Node* node) {
   ArmOperandGenerator g(this);
@@ -2939,6 +2979,42 @@ void InstructionSelector::VisitI16x8BitMask(Node* node) {
 
 void InstructionSelector::VisitI32x4BitMask(Node* node) {
   VisitBitMask<kArmI32x4BitMask>(this, node);
+}
+
+namespace {
+void VisitF32x4PminOrPmax(InstructionSelector* selector, ArchOpcode opcode,
+                          Node* node) {
+  ArmOperandGenerator g(selector);
+  // Need all unique registers because we first compare the two inputs, then we
+  // need the inputs to remain unchanged for the bitselect later.
+  selector->Emit(opcode, g.DefineAsRegister(node),
+                 g.UseUniqueRegister(node->InputAt(0)),
+                 g.UseUniqueRegister(node->InputAt(1)));
+}
+
+void VisitF64x2PminOrPMax(InstructionSelector* selector, ArchOpcode opcode,
+                          Node* node) {
+  ArmOperandGenerator g(selector);
+  selector->Emit(opcode, g.DefineSameAsFirst(node),
+                 g.UseRegister(node->InputAt(0)),
+                 g.UseRegister(node->InputAt(1)));
+}
+}  // namespace
+
+void InstructionSelector::VisitF32x4Pmin(Node* node) {
+  VisitF32x4PminOrPmax(this, kArmF32x4Pmin, node);
+}
+
+void InstructionSelector::VisitF32x4Pmax(Node* node) {
+  VisitF32x4PminOrPmax(this, kArmF32x4Pmax, node);
+}
+
+void InstructionSelector::VisitF64x2Pmin(Node* node) {
+  VisitF64x2PminOrPMax(this, kArmF64x2Pmin, node);
+}
+
+void InstructionSelector::VisitF64x2Pmax(Node* node) {
+  VisitF64x2PminOrPMax(this, kArmF64x2Pmax, node);
 }
 
 // static

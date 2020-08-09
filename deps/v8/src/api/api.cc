@@ -11,11 +11,11 @@
 #include <utility>  // For move
 #include <vector>
 
-#include "src/api/api-inl.h"
-
+#include "include/v8-cppgc.h"
 #include "include/v8-fast-api-calls.h"
 #include "include/v8-profiler.h"
 #include "include/v8-util.h"
+#include "src/api/api-inl.h"
 #include "src/api/api-natives.h"
 #include "src/base/functional.h"
 #include "src/base/logging.h"
@@ -58,6 +58,7 @@
 #include "src/json/json-parser.h"
 #include "src/json/json-stringifier.h"
 #include "src/logging/counters.h"
+#include "src/logging/tracing-flags.h"
 #include "src/numbers/conversions-inl.h"
 #include "src/objects/api-callbacks.h"
 #include "src/objects/contexts.h"
@@ -107,6 +108,7 @@
 #include "src/utils/detachable-vector.h"
 #include "src/utils/version.h"
 #include "src/wasm/streaming-decoder.h"
+#include "src/wasm/value-type.h"
 #include "src/wasm/wasm-engine.h"
 #include "src/wasm/wasm-objects-inl.h"
 #include "src/wasm/wasm-result.h"
@@ -503,7 +505,11 @@ void Utils::ReportOOMFailure(i::Isolate* isolate, const char* location,
     if (fatal_callback == nullptr) {
       base::OS::PrintError("\n#\n# Fatal %s OOM in %s\n#\n\n",
                            is_heap_oom ? "javascript" : "process", location);
+#ifdef V8_FUZZILLI
+      exit(0);
+#else
       base::OS::Abort();
+#endif  // V8_FUZZILLI
     } else {
       fatal_callback(location,
                      is_heap_oom
@@ -823,6 +829,8 @@ bool StartupData::CanBeRehashed() const {
   return i::Snapshot::ExtractRehashability(this);
 }
 
+bool StartupData::IsValid() const { return i::Snapshot::VersionIsValid(this); }
+
 void V8::SetDcheckErrorHandler(DcheckErrorCallback that) {
   v8::base::SetDcheckFunction(that);
 }
@@ -837,7 +845,9 @@ void V8::SetFlagsFromString(const char* str, size_t length) {
 }
 
 void V8::SetFlagsFromCommandLine(int* argc, char** argv, bool remove_flags) {
-  i::FlagList::SetFlagsFromCommandLine(argc, argv, remove_flags);
+  using HelpOptions = i::FlagList::HelpOptions;
+  i::FlagList::SetFlagsFromCommandLine(argc, argv, remove_flags,
+                                       HelpOptions(HelpOptions::kDontExit));
 }
 
 RegisteredExtension* RegisteredExtension::first_extension_ = nullptr;
@@ -977,6 +987,32 @@ i::Address* V8::GlobalizeTracedReference(i::Isolate* isolate, i::Address* obj,
   }
 #endif  // VERIFY_HEAP
   return result.location();
+}
+
+// static
+i::Address i::JSMemberBase::New(v8::Isolate* isolate, i::Address* object,
+                                i::Address* slot) {
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  LOG_API(i_isolate, JSMemberBase, New);
+#ifdef DEBUG
+  Utils::ApiCheck((object != nullptr), "i::JSMemberBase::New",
+                  "the object must be not null");
+  Utils::ApiCheck((slot != nullptr), "i::JSMemberBase::New",
+                  "the address slot must be not null");
+#endif
+  i::Handle<i::Object> result = i_isolate->global_handles()->CreateTraced(
+      *object, slot, false /* no destructor */);
+#ifdef VERIFY_HEAP
+  if (i::FLAG_verify_heap) {
+    i::Object(*object).ObjectVerify(i_isolate);
+  }
+#endif  // VERIFY_HEAP
+  return reinterpret_cast<i::Address>(result.location());
+}
+
+// static
+void i::JSMemberBase::Delete(i::Address* slot) {
+  i::GlobalHandles::DestroyTraced(slot);
 }
 
 i::Address* V8::CopyGlobalReference(i::Address* from) {
@@ -1274,7 +1310,7 @@ void Context::SetAlignedPointerInEmbedderData(int index, void* value) {
 
 static void InitializeTemplate(i::Handle<i::TemplateInfo> that, int type) {
   that->set_number_of_properties(0);
-  that->set_tag(i::Smi::FromInt(type));
+  that->set_tag(type);
 }
 
 void Template::Set(v8::Local<Name> name, v8::Local<Data> value,
@@ -1286,7 +1322,7 @@ void Template::Set(v8::Local<Name> name, v8::Local<Data> value,
   auto value_obj = Utils::OpenHandle(*value);
   CHECK(!value_obj->IsJSReceiver() || value_obj->IsTemplateInfo());
   if (value_obj->IsObjectTemplateInfo()) {
-    templ->set_serial_number(i::Smi::zero());
+    templ->set_serial_number(0);
     if (templ->IsFunctionTemplateInfo()) {
       i::Handle<i::FunctionTemplateInfo>::cast(templ)->set_do_not_cache(true);
     }
@@ -1336,7 +1372,7 @@ Local<ObjectTemplate> FunctionTemplate::PrototypeTemplate() {
   auto self = Utils::OpenHandle(this);
   i::Isolate* i_isolate = self->GetIsolate();
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
-  i::Handle<i::Object> result(self->GetPrototypeTemplate(), i_isolate);
+  i::Handle<i::HeapObject> result(self->GetPrototypeTemplate(), i_isolate);
   if (result->IsUndefined(i_isolate)) {
     // Do not cache prototype objects.
     result = Utils::OpenHandle(
@@ -1351,7 +1387,8 @@ void FunctionTemplate::SetPrototypeProviderTemplate(
   auto self = Utils::OpenHandle(this);
   i::Isolate* i_isolate = self->GetIsolate();
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
-  i::Handle<i::Object> result = Utils::OpenHandle(*prototype_provider);
+  i::Handle<i::FunctionTemplateInfo> result =
+      Utils::OpenHandle(*prototype_provider);
   CHECK(self->GetPrototypeTemplate().IsUndefined(i_isolate));
   CHECK(self->GetParentTemplate().IsUndefined(i_isolate));
   i::FunctionTemplateInfo::SetPrototypeProviderTemplate(i_isolate, self,
@@ -1394,7 +1431,7 @@ static Local<FunctionTemplate> FunctionTemplateNew(
     if (!do_not_cache) {
       next_serial_number = isolate->heap()->GetNextTemplateSerialNumber();
     }
-    obj->set_serial_number(i::Smi::FromInt(next_serial_number));
+    obj->set_serial_number(next_serial_number);
   }
   if (callback != nullptr) {
     Utils::ToLocal(obj)->SetCallHandler(callback, data, side_effect_type,
@@ -1605,15 +1642,19 @@ static Local<ObjectTemplate> ObjectTemplateNew(
       i::OBJECT_TEMPLATE_INFO_TYPE, i::AllocationType::kOld);
   i::Handle<i::ObjectTemplateInfo> obj =
       i::Handle<i::ObjectTemplateInfo>::cast(struct_obj);
-  InitializeTemplate(obj, Consts::OBJECT_TEMPLATE);
-  int next_serial_number = 0;
-  if (!do_not_cache) {
-    next_serial_number = isolate->heap()->GetNextTemplateSerialNumber();
+  {
+    // Disallow GC until all fields of obj have acceptable types.
+    i::DisallowHeapAllocation no_gc;
+    InitializeTemplate(obj, Consts::OBJECT_TEMPLATE);
+    int next_serial_number = 0;
+    if (!do_not_cache) {
+      next_serial_number = isolate->heap()->GetNextTemplateSerialNumber();
+    }
+    obj->set_serial_number(next_serial_number);
+    obj->set_data(0);
   }
-  obj->set_serial_number(i::Smi::FromInt(next_serial_number));
   if (!constructor.IsEmpty())
     obj->set_constructor(*Utils::OpenHandle(*constructor));
-  obj->set_data(i::Smi::zero());
   return Utils::ToLocal(obj);
 }
 
@@ -2232,6 +2273,28 @@ Local<UnboundModuleScript> Module::GetUnboundModuleScript() {
   return ToApiHandle<UnboundModuleScript>(i::Handle<i::SharedFunctionInfo>(
       i::Handle<i::SourceTextModule>::cast(self)->GetSharedFunctionInfo(),
       self->GetIsolate()));
+}
+
+int Module::ScriptId() {
+  i::Handle<i::Module> self = Utils::OpenHandle(this);
+  Utils::ApiCheck(self->IsSourceTextModule(), "v8::Module::ScriptId",
+                  "v8::Module::ScriptId must be used on an SourceTextModule");
+
+  // The SharedFunctionInfo is not available for errored modules.
+  Utils::ApiCheck(GetStatus() != kErrored, "v8::Module::ScriptId",
+                  "v8::Module::ScriptId must not be used on an errored module");
+  i::Handle<i::SharedFunctionInfo> sfi(
+      i::Handle<i::SourceTextModule>::cast(self)->GetSharedFunctionInfo(),
+      self->GetIsolate());
+  return ToApiHandle<UnboundScript>(sfi)->GetId();
+}
+
+bool Module::IsSourceTextModule() const {
+  return Utils::OpenHandle(this)->IsSourceTextModule();
+}
+
+bool Module::IsSyntheticModule() const {
+  return Utils::OpenHandle(this)->IsSyntheticModule();
 }
 
 int Module::GetIdentityHash() const { return Utils::OpenHandle(this)->hash(); }
@@ -5802,9 +5865,9 @@ static i::Handle<ObjectType> CreateEnvironment(
     v8::Local<ObjectTemplate> proxy_template;
     i::Handle<i::FunctionTemplateInfo> proxy_constructor;
     i::Handle<i::FunctionTemplateInfo> global_constructor;
-    i::Handle<i::Object> named_interceptor(
+    i::Handle<i::HeapObject> named_interceptor(
         isolate->factory()->undefined_value());
-    i::Handle<i::Object> indexed_interceptor(
+    i::Handle<i::HeapObject> indexed_interceptor(
         isolate->factory()->undefined_value());
 
     if (!maybe_global_template.IsEmpty()) {
@@ -8415,8 +8478,7 @@ void Isolate::GetHeapStatistics(HeapStatistics* heap_statistics) {
   i::ReadOnlySpace* ro_space = heap->read_only_space();
   heap_statistics->total_heap_size_ += ro_space->CommittedMemory();
   heap_statistics->total_physical_size_ += ro_space->CommittedPhysicalMemory();
-  heap_statistics->total_available_size_ += ro_space->Available();
-  heap_statistics->used_heap_size_ += ro_space->SizeOfObjects();
+  heap_statistics->used_heap_size_ += ro_space->Size();
 #endif  // V8_SHARED_RO_HEAP
 
   heap_statistics->total_heap_size_executable_ =
@@ -8450,18 +8512,26 @@ bool Isolate::GetHeapSpaceStatistics(HeapSpaceStatistics* space_statistics,
 
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(this);
   i::Heap* heap = isolate->heap();
-  i::Space* space = heap->space(static_cast<int>(index));
 
   i::AllocationSpace allocation_space = static_cast<i::AllocationSpace>(index);
-  space_statistics->space_name_ = i::Heap::GetSpaceName(allocation_space);
+  space_statistics->space_name_ = i::BaseSpace::GetSpaceName(allocation_space);
 
-  if (allocation_space == i::RO_SPACE && V8_SHARED_RO_HEAP_BOOL) {
-    // RO_SPACE memory is accounted for elsewhere when ReadOnlyHeap is shared.
-    space_statistics->space_size_ = 0;
-    space_statistics->space_used_size_ = 0;
-    space_statistics->space_available_size_ = 0;
-    space_statistics->physical_space_size_ = 0;
+  if (allocation_space == i::RO_SPACE) {
+    if (V8_SHARED_RO_HEAP_BOOL) {
+      // RO_SPACE memory is accounted for elsewhere when ReadOnlyHeap is shared.
+      space_statistics->space_size_ = 0;
+      space_statistics->space_used_size_ = 0;
+      space_statistics->space_available_size_ = 0;
+      space_statistics->physical_space_size_ = 0;
+    } else {
+      i::ReadOnlySpace* space = heap->read_only_space();
+      space_statistics->space_size_ = space->CommittedMemory();
+      space_statistics->space_used_size_ = space->Size();
+      space_statistics->space_available_size_ = 0;
+      space_statistics->physical_space_size_ = space->CommittedPhysicalMemory();
+    }
   } else {
+    i::Space* space = heap->space(static_cast<int>(index));
     space_statistics->space_size_ = space->CommittedMemory();
     space_statistics->space_used_size_ = space->SizeOfObjects();
     space_statistics->space_available_size_ = space->Available();
@@ -10305,9 +10375,11 @@ int debug::WasmValue::value_type() {
 
 v8::Local<v8::Array> debug::WasmValue::bytes() {
   i::Handle<i::WasmValue> obj = Utils::OpenHandle(this);
-  // Should only be called on i32, i64, f32, f64, s128.
-  DCHECK_GE(1, obj->value_type());
-  DCHECK_LE(5, obj->value_type());
+  DCHECK(i::wasm::ValueType::Kind::kI32 == obj->value_type() ||
+         i::wasm::ValueType::Kind::kI64 == obj->value_type() ||
+         i::wasm::ValueType::Kind::kF32 == obj->value_type() ||
+         i::wasm::ValueType::Kind::kF64 == obj->value_type() ||
+         i::wasm::ValueType::Kind::kS128 == obj->value_type());
 
   i::Isolate* isolate = obj->GetIsolate();
   i::Handle<i::Object> bytes_or_ref(obj->bytes_or_ref(), isolate);
@@ -10329,8 +10401,7 @@ v8::Local<v8::Array> debug::WasmValue::bytes() {
 
 v8::Local<v8::Value> debug::WasmValue::ref() {
   i::Handle<i::WasmValue> obj = Utils::OpenHandle(this);
-  // Should only be called on anyref.
-  DCHECK_EQ(6, obj->value_type());
+  DCHECK_EQ(i::wasm::HeapType::kExtern, obj->value_type());
 
   i::Isolate* isolate = obj->GetIsolate();
   i::Handle<i::Object> bytes_or_ref(obj->bytes_or_ref(), isolate);

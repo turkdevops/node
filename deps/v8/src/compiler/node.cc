@@ -11,7 +11,8 @@ namespace compiler {
 Node::OutOfLineInputs* Node::OutOfLineInputs::New(Zone* zone, int capacity) {
   size_t size =
       sizeof(OutOfLineInputs) + capacity * (sizeof(Node*) + sizeof(Use));
-  intptr_t raw_buffer = reinterpret_cast<intptr_t>(zone->New(size));
+  intptr_t raw_buffer =
+      reinterpret_cast<intptr_t>(zone->Allocate<Node::OutOfLineInputs>(size));
   Node::OutOfLineInputs* outline =
       reinterpret_cast<OutOfLineInputs*>(raw_buffer + capacity * sizeof(Use));
   outline->capacity_ = capacity;
@@ -50,6 +51,9 @@ void Node::OutOfLineInputs::ExtractFrom(Use* old_use_ptr, Node** old_input_ptr,
   this->count_ = count;
 }
 
+// These structs are just type tags for Zone::Allocate<T>(size_t) calls.
+struct NodeWithOutOfLineInputs {};
+struct NodeWithInLineInputs {};
 
 Node* Node::New(Zone* zone, NodeId id, const Operator* op, int input_count,
                 Node* const* inputs, bool has_extensible_inputs) {
@@ -75,7 +79,8 @@ Node* Node::New(Zone* zone, NodeId id, const Operator* op, int input_count,
     OutOfLineInputs* outline = OutOfLineInputs::New(zone, capacity);
 
     // Allocate node, with space for OutOfLineInputs pointer.
-    void* node_buffer = zone->New(sizeof(Node) + sizeof(OutOfLineInputs*));
+    void* node_buffer = zone->Allocate<NodeWithOutOfLineInputs>(
+        sizeof(Node) + sizeof(OutOfLineInputs*));
     node = new (node_buffer) Node(id, op, kOutlineMarker, 0);
     node->set_outline_inputs(outline);
 
@@ -95,7 +100,8 @@ Node* Node::New(Zone* zone, NodeId id, const Operator* op, int input_count,
     }
 
     size_t size = sizeof(Node) + capacity * (sizeof(Node*) + sizeof(Use));
-    intptr_t raw_buffer = reinterpret_cast<intptr_t>(zone->New(size));
+    intptr_t raw_buffer =
+        reinterpret_cast<intptr_t>(zone->Allocate<NodeWithInLineInputs>(size));
     void* node_buffer =
         reinterpret_cast<void*>(raw_buffer + capacity * sizeof(Use));
 
@@ -217,16 +223,17 @@ void Node::InsertInputs(Zone* zone, int index, int count) {
   Verify();
 }
 
-void Node::RemoveInput(int index) {
+Node* Node::RemoveInput(int index) {
   DCHECK_LE(0, index);
   DCHECK_LT(index, InputCount());
+  Node* result = InputAt(index);
   for (; index < InputCount() - 1; ++index) {
     ReplaceInput(index, InputAt(index + 1));
   }
   TrimInputCount(InputCount() - 1);
   Verify();
+  return result;
 }
-
 
 void Node::ClearInputs(int start, int count) {
   Node** input_ptr = GetInputPtr(start);
@@ -258,6 +265,19 @@ void Node::TrimInputCount(int new_input_count) {
   }
 }
 
+void Node::EnsureInputCount(Zone* zone, int new_input_count) {
+  int current_count = InputCount();
+  DCHECK_NE(current_count, 0);
+  if (current_count > new_input_count) {
+    TrimInputCount(new_input_count);
+  } else if (current_count < new_input_count) {
+    Node* dummy = InputAt(current_count - 1);
+    do {
+      AppendInput(zone, dummy);
+      current_count++;
+    } while (current_count < new_input_count);
+  }
+}
 
 int Node::UseCount() const {
   int use_count = 0;
@@ -402,7 +422,7 @@ void Node::RemoveUse(Use* use) {
 
 #if DEBUG
 void Node::Verify() {
-  // Check basic sanity of input data structures.
+  // Check basic validity of input data structures.
   fflush(stdout);
   int count = this->InputCount();
   // Avoid quadratic explosion for mega nodes; only verify if the input

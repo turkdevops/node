@@ -150,6 +150,7 @@ class Code : public HeapObject {
   // instruction stream where the safepoint table starts.
   inline int safepoint_table_offset() const;
   inline void set_safepoint_table_offset(int offset);
+  Address SafepointTableAddress() const;
   int safepoint_table_size() const;
   bool has_safepoint_table() const;
 
@@ -157,6 +158,7 @@ class Code : public HeapObject {
   // exception handler table starts.
   inline int handler_table_offset() const;
   inline void set_handler_table_offset(int offset);
+  Address HandlerTableAddress() const;
   int handler_table_size() const;
   bool has_handler_table() const;
 
@@ -371,6 +373,7 @@ class Code : public HeapObject {
   inline HandlerTable::CatchPrediction GetBuiltinCatchPrediction();
 
   bool IsIsolateIndependent(Isolate* isolate);
+  bool IsNativeContextIndependent(Isolate* isolate);
 
   inline bool CanContainWeakObjects();
 
