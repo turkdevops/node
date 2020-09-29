@@ -34,7 +34,7 @@
     "react-helmet": "^5.2.1",
     "rebass": "^4.0.5",
     "styled-components": "^4.4.0",
-    "snyk": "^1.372.0"
+    "snyk": "^1.403.0"
   },
   "scripts": {
     "develop": "gatsby develop",
